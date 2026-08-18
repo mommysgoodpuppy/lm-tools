@@ -3,4 +3,6 @@
 *.part
 *.part.json
 results/
-
+__pycache__/
+*.pyc
+/vendor/tinygrad/

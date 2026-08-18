@@ -1,6 +1,7 @@
 import { downloadCommand, downloadUsage } from "./download.ts";
 import { llamaCommand, llamaUsage } from "./llama.ts";
 import { proxyCommand, proxyUsage } from "./proxy.ts";
+import { tinygradCommand, tinygradUsage } from "./tinygrad.ts";
 import { vscodeCommand, vscodeUsage } from "./vscode.ts";
 
 const VERSION = "0.1.0";
@@ -15,6 +16,7 @@ Commands:
   download  Resumable parallel download for large model files
   llama     Launch llama-server with useful local defaults
   proxy     Adapt OpenAI-compatible traffic for clients such as VS Code
+  tinygrad  Run the experimental vendored tinygrad LLM backend
   vscode    Start the 128K Qwen llama/proxy stack for VS Code
 
 Run \"lm <command> --help\" for command-specific help.`;
@@ -34,6 +36,9 @@ export async function main(args: string[]): Promise<void> {
     case "proxy":
       await proxyCommand(commandArgs);
       return;
+    case "tinygrad":
+      await tinygradCommand(commandArgs);
+      return;
     case "vscode":
       await vscodeCommand(commandArgs);
       return;
@@ -46,6 +51,8 @@ export async function main(args: string[]): Promise<void> {
           ? llamaUsage()
           : topic === "proxy"
           ? proxyUsage()
+          : topic === "tinygrad"
+          ? tinygradUsage()
           : topic === "vscode"
           ? vscodeUsage()
           : usage(),

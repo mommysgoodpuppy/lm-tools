@@ -1,14 +1,17 @@
 {
   "tasks": {
     "lm": "deno run -A main.ts",
-    "check": "deno check main.ts src/**/*.ts",
+    "tinygrad:vendor": "deno run --allow-env --allow-read --allow-write --allow-run=git scripts/vendor_tinygrad.ts",
+    "check": "deno check main.ts src/**/*.ts scripts/**/*.ts",
     "test": "deno test -A",
     "verify": "deno fmt --check && deno lint && deno task check && deno task test"
   },
   "fmt": {
-    "lineWidth": 100
+    "lineWidth": 100,
+    "exclude": ["vendor/"]
   },
   "lint": {
+    "exclude": ["vendor/"],
     "rules": {
       "tags": ["recommended"]
     }
