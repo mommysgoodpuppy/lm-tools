@@ -7,9 +7,19 @@ import {
 } from "./llama.ts";
 import { serveProxy } from "./proxy.ts";
 import type { PromptEvaluationProgress, PromptProgressSource } from "./proxy.ts";
+import { defaultDiagnosticLog } from "./log.ts";
+import { terminateChild } from "./process_manager.ts";
 
-const PROXY_HOST = "127.0.0.1";
-const PROXY_PORT = 1235;
+export const DEFAULT_PROXY_HOST = "127.0.0.1";
+export const DEFAULT_PROXY_PORT = 1235;
+
+export interface VscodeStackConfig {
+  proxyHost: string;
+  proxyPort: number;
+  modelAlias: string;
+  reasoningEffortMap?: Record<string, string>;
+  shutdownGraceMs?: number;
+}
 
 export function parsePromptProgressLine(line: string): PromptEvaluationProgress | undefined {
   const match =
@@ -77,8 +87,9 @@ Starts llama-server and the VS Code compatibility proxy together.
 Defaults specific to this command:
   context       128k
   KV cache      q8_0 keys / q4_0 values
+  MTP drafting  2 tokens
   llama-server  http://127.0.0.1:8080
-  VS Code URL   http://${PROXY_HOST}:${PROXY_PORT}/v1/responses
+  VS Code URL   http://${DEFAULT_PROXY_HOST}:${DEFAULT_PROXY_PORT}/v1/responses
 
 All \"lm llama\" options are accepted. The compatibility proxy intentionally
 listens only on localhost in this combined mode.`;
@@ -114,24 +125,53 @@ export async function vscodeCommand(args: string[]): Promise<void> {
     CONTEXT_SIZE: inherited.CONTEXT_SIZE ?? "128k",
     KV_CACHE_TYPE_K: inherited.KV_CACHE_TYPE_K ?? inherited.KV_CACHE_TYPE ?? "q8_0",
     KV_CACHE_TYPE_V: inherited.KV_CACHE_TYPE_V ?? inherited.KV_CACHE_TYPE ?? "q4_0",
+    MTP_DRAFT_TOKENS: inherited.MTP_DRAFT_TOKENS ?? "2",
   });
-  options.serverArgs = ["--alias", "qwen3.8-27b", ...options.serverArgs];
+  await runVscodeStack(options, {
+    proxyHost: DEFAULT_PROXY_HOST,
+    proxyPort: DEFAULT_PROXY_PORT,
+    modelAlias: "qwen3.8-27b",
+  });
+}
+
+export async function runVscodeStack(
+  options: ReturnType<typeof parseLlamaArgs>,
+  stack: VscodeStackConfig,
+): Promise<void> {
+  options = { ...options, serverArgs: ["--alias", stack.modelAlias, ...options.serverArgs] };
 
   console.log(
-    `VS Code stack: context=${options.context}, KV=${options.cacheTypeK}/${options.cacheTypeV}`,
+    `VS Code stack: context=${options.context}, KV=${options.cacheTypeK}/${options.cacheTypeV}, ` +
+      `MTP=${options.mtpDraftTokens || "off"}`,
   );
   if (options.dryRun) {
     console.log([options.server, ...buildLlamaArgs(options)].map(shellQuote).join(" "));
-    console.log(`proxy ${PROXY_HOST}:${PROXY_PORT} -> http://${options.host}:${options.port}`);
+    console.log(
+      `proxy ${stack.proxyHost}:${stack.proxyPort} -> http://${options.host}:${options.port}`,
+    );
     return;
   }
 
   await validateLlamaOptions(options);
+  const diagnostics = defaultDiagnosticLog();
+  diagnostics.log("vscode", "started", {
+    model: options.model,
+    context: options.context,
+    cacheTypeK: options.cacheTypeK,
+    cacheTypeV: options.cacheTypeV,
+    mtpDraftTokens: options.mtpDraftTokens,
+  });
   const progress = new LlamaPromptProgress();
   const child = spawnLlama(options, "piped");
   const outputTasks = [
-    mirrorAndInspect(child.stdout, Deno.stdout, (line) => progress.inspect(line)),
-    mirrorAndInspect(child.stderr, Deno.stderr, (line) => progress.inspect(line)),
+    mirrorAndInspect(child.stdout, Deno.stdout, (line) => {
+      progress.inspect(line);
+      diagnostics.log("llama-server", "stdout", { line });
+    }),
+    mirrorAndInspect(child.stderr, Deno.stderr, (line) => {
+      progress.inspect(line);
+      diagnostics.log("llama-server", "stderr", { line });
+    }),
   ];
   const abort = new AbortController();
   let shuttingDown = false;
@@ -151,12 +191,14 @@ export async function vscodeCommand(args: string[]): Promise<void> {
     await waitUntilReady(`http://${options.host}:${options.port}/health`, child);
     console.log("llama-server is ready");
     const proxy = serveProxy({
-      listenHost: PROXY_HOST,
-      listenPort: PROXY_PORT,
+      listenHost: stack.proxyHost,
+      listenPort: stack.proxyPort,
       upstream: new URL(`http://${options.host}:${options.port}`),
       promptProgress: progress,
+      reasoningEffortMap: stack.reasoningEffortMap,
+      diagnostics,
     }, abort.signal);
-    console.log(`VS Code endpoint: http://${PROXY_HOST}:${PROXY_PORT}/v1/responses`);
+    console.log(`VS Code endpoint: http://${stack.proxyHost}:${stack.proxyPort}/v1/responses`);
     const outcome = await Promise.race([
       child.status.then((status) => ({ kind: "child" as const, status })),
       proxy.finished.then(() => ({ kind: "proxy" as const })),
@@ -168,7 +210,10 @@ export async function vscodeCommand(args: string[]): Promise<void> {
     shutdown();
     Deno.removeSignalListener("SIGINT", shutdown);
     Deno.removeSignalListener("SIGTERM", shutdown);
-    await child.status;
+    const termination = await terminateChild(child, stack.shutdownGraceMs ?? 5000);
+    if (termination === "killed") console.error("llama-server ignored SIGTERM and was killed");
     await Promise.allSettled(outputTasks);
+    diagnostics.log("vscode", "stopped");
+    await diagnostics.flush();
   }
 }

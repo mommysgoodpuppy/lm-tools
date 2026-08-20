@@ -1,4 +1,5 @@
-import { parsePort, parsePositiveInteger, takeValue } from "./args.ts";
+import { parseNonNegativeInteger, parsePort, parsePositiveInteger, takeValue } from "./args.ts";
+import { terminateChild } from "./process_manager.ts";
 
 const DEFAULT_MODEL =
   "/home/ellie/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf";
@@ -13,9 +14,11 @@ export interface LlamaOptions {
   cacheTypeK: string;
   cacheTypeV: string;
   gpuLayers: string;
+  flashAttention: boolean;
   batchSize: number;
   ubatchSize: number;
   parallel: number;
+  mtpDraftTokens: number;
   mmproj?: string;
   webui: boolean;
   dryRun: boolean;
@@ -38,6 +41,7 @@ Options:
   --batch-size N        Logical batch size (default: 1024)
   --ubatch-size N       Physical batch size (default: 256)
   --parallel N          Concurrent sequences (default: 1)
+  --mtp N               Native MTP draft tokens; 0 disables it (default: 0)
   --mmproj PATH         Enable vision with this projector
   --no-webui            Disable llama.cpp's web UI
   --dry-run             Print the resolved command without starting it
@@ -71,9 +75,11 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
     cacheTypeK: env.KV_CACHE_TYPE_K ?? commonKv,
     cacheTypeV: env.KV_CACHE_TYPE_V ?? commonKv,
     gpuLayers: "all",
+    flashAttention: true,
     batchSize: 1024,
     ubatchSize: 256,
     parallel: 1,
+    mtpDraftTokens: parseNonNegativeInteger(env.MTP_DRAFT_TOKENS ?? "0", "MTP_DRAFT_TOKENS"),
     webui: true,
     dryRun: false,
     serverArgs,
@@ -136,6 +142,9 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
       case "--parallel":
         options.parallel = parsePositiveInteger(value, arg);
         break;
+      case "--mtp":
+        options.mtpDraftTokens = parseNonNegativeInteger(value, arg);
+        break;
       case "--mmproj":
         options.mmproj = value;
         break;
@@ -163,7 +172,7 @@ export function buildLlamaArgs(options: LlamaOptions): string[] {
     "--fit",
     "off",
     "--flash-attn",
-    "on",
+    options.flashAttention ? "on" : "off",
     "--cache-type-k",
     options.cacheTypeK,
     "--cache-type-v",
@@ -174,6 +183,9 @@ export function buildLlamaArgs(options: LlamaOptions): string[] {
     String(options.ubatchSize),
     "--parallel",
     String(options.parallel),
+    ...(options.mtpDraftTokens > 0
+      ? ["--spec-type", "draft-mtp", "--spec-draft-n-max", String(options.mtpDraftTokens)]
+      : []),
     ...(options.mmproj ? ["--mmproj", options.mmproj] : []),
     ...options.serverArgs,
   ];
@@ -229,6 +241,10 @@ export async function llamaCommand(args: string[]): Promise<void> {
     throw error;
   }
 
+  await runLlama(options);
+}
+
+export async function runLlama(options: LlamaOptions): Promise<void> {
   const serverArgs = buildLlamaArgs(options);
   console.log(
     `llama-server: model=${options.model}, context=${options.context}, ` +
@@ -241,8 +257,28 @@ export async function llamaCommand(args: string[]): Promise<void> {
 
   await validateLlamaOptions(options);
   const child = spawnLlama(options);
-  const status = await child.status;
-  if (!status.success) Deno.exit(status.code);
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      return;
+    }
+  };
+  Deno.addSignalListener("SIGINT", shutdown);
+  Deno.addSignalListener("SIGTERM", shutdown);
+  try {
+    const status = await child.status;
+    if (!status.success && !shuttingDown) Deno.exit(status.code);
+  } finally {
+    shutdown();
+    Deno.removeSignalListener("SIGINT", shutdown);
+    Deno.removeSignalListener("SIGTERM", shutdown);
+    const termination = await terminateChild(child, 5000);
+    if (termination === "killed") console.error("llama-server ignored SIGTERM and was killed");
+  }
 }
 
 export function shellQuote(value: string): string {

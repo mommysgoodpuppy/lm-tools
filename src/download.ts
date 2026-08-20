@@ -1,11 +1,14 @@
 import { parsePositiveInteger, takeValue } from "./args.ts";
 import { dirname } from "node:path";
+import { createHash } from "node:crypto";
 
-interface DownloadOptions {
+export interface DownloadFileOptions {
   url: URL;
   output: string;
   connections: number;
   chunkBytes: number;
+  expectedSize?: number;
+  sha256?: string;
 }
 
 interface RemoteFile {
@@ -29,7 +32,7 @@ export function downloadUsage(): string {
   return `Usage: lm download URL OUTPUT [options]
 
 Options:
-  --connections N  Parallel requests (default: 8)
+  --connections N  Parallel requests (default: 16 for Hugging Face, otherwise 8)
   --chunk-mib N    Chunk size in MiB (default: 64)
   --help           Show this help
 
@@ -44,10 +47,14 @@ export function planChunks(size: number, chunkBytes: number): Chunk[] {
   return chunks;
 }
 
-function parseDownloadArgs(args: string[]): DownloadOptions {
+export function recommendedConnections(url: URL): number {
+  return url.hostname === "huggingface.co" || url.hostname.endsWith(".huggingface.co") ? 16 : 8;
+}
+
+function parseDownloadArgs(args: string[]): DownloadFileOptions {
   if (args.includes("--help") || args.includes("-h")) throw new DownloadHelp(downloadUsage());
   const positional: string[] = [];
-  let connections = 8;
+  let connections: number | undefined;
   let chunkMib = 64;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -64,7 +71,12 @@ function parseDownloadArgs(args: string[]): DownloadOptions {
   if (positional.length !== 2) throw new Error(downloadUsage());
   const url = new URL(positional[0]);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("URL must use http: or https:");
-  return { url, output: positional[1], connections, chunkBytes: chunkMib * 1024 * 1024 };
+  return {
+    url,
+    output: positional[1],
+    connections: connections ?? recommendedConnections(url),
+    chunkBytes: chunkMib * 1024 * 1024,
+  };
 }
 
 class DownloadHelp extends Error {}
@@ -93,7 +105,11 @@ async function inspectRemote(url: URL): Promise<RemoteFile> {
   };
 }
 
-function sameRemote(state: DownloadState, options: DownloadOptions, remote: RemoteFile): boolean {
+function sameRemote(
+  state: DownloadState,
+  options: DownloadFileOptions,
+  remote: RemoteFile,
+): boolean {
   return state.url === options.url.href && state.size === remote.size &&
     state.etag === remote.etag && state.lastModified === remote.lastModified &&
     state.chunkBytes === options.chunkBytes;
@@ -159,7 +175,7 @@ async function pathExists(path: string): Promise<boolean> {
 }
 
 export async function downloadCommand(args: string[]): Promise<void> {
-  let options: DownloadOptions;
+  let options: DownloadFileOptions;
   try {
     options = parseDownloadArgs(args);
   } catch (error) {
@@ -169,8 +185,54 @@ export async function downloadCommand(args: string[]): Promise<void> {
     }
     throw error;
   }
+  await downloadFile(options);
+}
+
+export async function sha256File(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  const file = await Deno.open(path, { read: true });
+  try {
+    for await (const chunk of file.readable) hash.update(chunk);
+  } finally {
+    try {
+      file.close();
+    } catch {
+      // Consuming the readable stream normally closes the file.
+    }
+  }
+  return hash.digest("hex");
+}
+
+export async function verifyFileIntegrity(
+  path: string,
+  expectedSize?: number,
+  expectedSha256?: string,
+): Promise<void> {
+  const info = await Deno.stat(path);
+  if (!info.isFile) throw new Error(`Artifact is not a file: ${path}`);
+  if (expectedSize !== undefined && info.size !== expectedSize) {
+    throw new Error(
+      `Artifact size mismatch for ${path}: expected ${expectedSize}, got ${info.size}`,
+    );
+  }
+  if (expectedSha256 !== undefined) {
+    const actual = await sha256File(path);
+    if (actual !== expectedSha256.toLowerCase()) {
+      throw new Error(
+        `Artifact SHA-256 mismatch for ${path}: expected ${expectedSha256}, got ${actual}`,
+      );
+    }
+  }
+}
+
+export async function downloadFile(options: DownloadFileOptions): Promise<void> {
   if (await pathExists(options.output)) throw new Error(`Output already exists: ${options.output}`);
   const remote = await inspectRemote(options.url);
+  if (options.expectedSize !== undefined && remote.size !== options.expectedSize) {
+    throw new Error(
+      `Remote size mismatch: expected ${options.expectedSize}, server reports ${remote.size}`,
+    );
+  }
   const partialPath = `${options.output}.part`;
   const statePath = `${partialPath}.json`;
   const outputDirectory = dirname(options.output);
@@ -226,14 +288,15 @@ export async function downloadCommand(args: string[]): Promise<void> {
         );
         completed.add(current.index);
         doneBytes += received;
+        const completedBytes = doneBytes;
         state.completed = [...completed].sort((a, b) => a - b);
         stateWrites = stateWrites.then(() => writeState(statePath, state));
         await stateWrites;
         const seconds = Math.max((performance.now() - started) / 1000, 0.001);
-        const speed = (doneBytes - initiallyDone) / seconds;
+        const speed = (completedBytes - initiallyDone) / seconds;
         console.log(
-          `${(doneBytes / remote.size * 100).toFixed(2).padStart(6)}%  ` +
-            `${(doneBytes / 1e9).toFixed(2)}/${(remote.size / 1e9).toFixed(2)} GB  ` +
+          `${(completedBytes / remote.size * 100).toFixed(2).padStart(6)}%  ` +
+            `${(completedBytes / 1e9).toFixed(2)}/${(remote.size / 1e9).toFixed(2)} GB  ` +
             `${(speed / 1e6).toFixed(1)} MB/s`,
         );
       }
@@ -248,6 +311,15 @@ export async function downloadCommand(args: string[]): Promise<void> {
   }
 
   if (completed.size !== chunks.length) throw new Error("Download incomplete; rerun to resume");
+  try {
+    await verifyFileIntegrity(partialPath, options.expectedSize, options.sha256);
+  } catch (error) {
+    state.completed = [];
+    await writeState(statePath, state);
+    throw new Error(
+      `${error instanceof Error ? error.message : error}; chunk state was reset, rerun to repair`,
+    );
+  }
   await Deno.rename(partialPath, options.output);
   await Deno.remove(statePath);
   console.log(`Complete: ${options.output} (${(remote.size / 1e9).toFixed(2)} GB)`);

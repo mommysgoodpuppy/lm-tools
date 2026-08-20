@@ -1,9 +1,13 @@
 {
   "tasks": {
     "lm": "deno run -A main.ts",
+    "kill-everything": "deno run -A main.ts kill-everything",
+    "ps2-campaign": "bash scripts/ps2_campaign.sh",
     "tinygrad:vendor": "deno run --allow-env --allow-read --allow-write --allow-run=git scripts/vendor_tinygrad.ts",
+    "diffusiongemma:vendor": "deno run --allow-env --allow-read --allow-write --allow-run=git,cmake,npm scripts/vendor_diffusiongemma.ts",
+    "t3code:build": "deno run --allow-read --allow-write --allow-run=node,corepack scripts/build_t3code.ts",
     "check": "deno check main.ts src/**/*.ts scripts/**/*.ts",
-    "test": "deno test -A",
+    "test": "deno test -A src/",
     "verify": "deno fmt --check && deno lint && deno task check && deno task test"
   },
   "fmt": {

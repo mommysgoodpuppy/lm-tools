@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lm-tools.local/schemas/agent-environment.schema.json",
+  "title": "lm-tools agent environment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "name",
+    "modelDeployment",
+    "seedOnCreate",
+    "backend",
+    "guest",
+    "seeds"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "name": { "$ref": "#/$defs/nonEmptyString" },
+    "modelDeployment": { "$ref": "#/$defs/nonEmptyString" },
+    "seedOnCreate": { "type": "boolean" },
+    "backend": { "$ref": "#/$defs/incusBackend" },
+    "guest": { "$ref": "#/$defs/guest" },
+    "worker": { "$ref": "#/$defs/worker" },
+    "seeds": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/seed" }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "incusBackend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "executable",
+        "instance",
+        "image",
+        "network",
+        "limits",
+        "modelAccess"
+      ],
+      "properties": {
+        "kind": { "const": "incus" },
+        "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "instance": { "$ref": "#/$defs/nonEmptyString" },
+        "image": { "$ref": "#/$defs/nonEmptyString" },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "device"],
+          "properties": {
+            "name": { "$ref": "#/$defs/nonEmptyString" },
+            "device": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cpu", "memory", "processes"],
+          "properties": {
+            "cpu": { "type": "integer", "minimum": 1 },
+            "memory": { "$ref": "#/$defs/nonEmptyString" },
+            "processes": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "modelAccess": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["host", "port"],
+          "properties": {
+            "host": { "$ref": "#/$defs/nonEmptyString" },
+            "port": { "$ref": "#/$defs/port" }
+          }
+        }
+      }
+    },
+    "guest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["user", "uid", "gid", "home", "workspace", "packages"],
+      "properties": {
+        "user": { "$ref": "#/$defs/nonEmptyString" },
+        "uid": { "type": "integer", "minimum": 1 },
+        "gid": { "type": "integer", "minimum": 1 },
+        "home": { "$ref": "#/$defs/nonEmptyString" },
+        "workspace": { "$ref": "#/$defs/nonEmptyString" },
+        "packages": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "seed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "target", "exclude", "refresh"],
+      "properties": {
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "target": { "$ref": "#/$defs/nonEmptyString" },
+        "refresh": { "type": "boolean" },
+        "exclude": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    },
+    "worker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transport",
+        "prompt",
+        "state",
+        "metricsDirectory",
+        "dashboardPort",
+        "timeoutSeconds",
+        "cooldownSeconds",
+        "progressRepositories",
+        "cleanupProcesses"
+      ],
+      "properties": {
+        "transport": { "enum": ["exec-json", "app-server"] },
+        "prompt": { "$ref": "#/$defs/nonEmptyString" },
+        "state": { "$ref": "#/$defs/nonEmptyString" },
+        "metricsDirectory": { "$ref": "#/$defs/nonEmptyString" },
+        "dashboardPort": { "$ref": "#/$defs/port" },
+        "timeoutSeconds": { "type": "integer", "minimum": 60 },
+        "cooldownSeconds": { "type": "integer", "minimum": 0 },
+        "progressRepositories": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "cleanupProcesses": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        }
+      }
+    }
+  }
+}

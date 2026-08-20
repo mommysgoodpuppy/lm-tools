@@ -1,0 +1,71 @@
+{
+  "$schema": "../schemas/deployment.schema.json",
+  "version": 1,
+  "name": "qwen-vscode",
+  "model": {
+    "id": "qwen3.8-27b",
+    "name": "Qwen3.8 27B (local, 128K)",
+    "path": "/home/ellie/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf",
+    "capabilities": {
+      "tools": true,
+      "vision": false,
+      "reasoning": true,
+      "streaming": true,
+      "supportedReasoningLevels": ["none", "low", "medium", "xhigh"]
+    }
+  },
+  "runtime": {
+    "contextWindow": 131072,
+    "maxOutputTokens": 16384,
+    "expectedVramMiB": 21000
+  },
+  "backend": {
+    "kind": "llama.cpp",
+    "executable": "/usr/bin/llama-server",
+    "listen": {
+      "host": "127.0.0.1",
+      "port": 8080
+    },
+    "gpuLayers": "all",
+    "flashAttention": true,
+    "kvCache": {
+      "key": "q8_0",
+      "value": "q4_0"
+    },
+    "batch": {
+      "logical": 1024,
+      "physical": 256
+    },
+    "parallel": 1,
+    "ui": true,
+    "speculative": {
+      "kind": "mtp",
+      "draftTokens": 2
+    }
+  },
+  "compatibility": {
+    "responsesProxy": {
+      "enabled": true,
+      "listen": {
+        "host": "127.0.0.1",
+        "port": 1235
+      }
+    }
+  },
+  "exposure": {
+    "tailscaleServe": {
+      "enabled": true,
+      "executable": "/usr/bin/tailscale",
+      "httpsPort": 443
+    }
+  },
+  "clients": {
+    "vscode": {
+      "enabled": true,
+      "configPath": "/home/ellie/.config/Code/User/chatLanguageModels.json",
+      "providerName": "Local Qwen",
+      "vendor": "customendpoint",
+      "reasoningEffort": "high"
+    }
+  }
+}

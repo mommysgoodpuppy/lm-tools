@@ -1,0 +1,97 @@
+diff --git a/index.html b/index.html
+index dfe5170..14da218 100644
+--- a/index.html
++++ b/index.html
+@@ -3,10 +3,18 @@
+   <head>
+     <meta charset="UTF-8" />
+     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
++    <link rel="icon" href="data:," />
+     <title>DiffusionGemma Lab</title>
+   </head>
+   <body>
+     <div id="root"></div>
++    <script type="module">
++      import RefreshRuntime from "/@react-refresh";
++      RefreshRuntime.injectIntoGlobalHook(window);
++      window.$RefreshReg$ = () => {};
++      window.$RefreshSig$ = () => (type) => type;
++      window.__vite_plugin_react_preamble_installed__ = true;
++    </script>
+     <script type="module" src="/src/main.tsx"></script>
+   </body>
+ </html>
+diff --git a/server/dev.ts b/server/dev.ts
+index fdbcacb..4e044b6 100644
+--- a/server/dev.ts
++++ b/server/dev.ts
+@@ -725,7 +725,7 @@ function handleStderr(data: string) {
+ let processNPredict: number | null = null;
+ let processMaxSteps: number | null = null;
+ 
+-function startModel(nPredict = 4096, maxSteps = 0) {
++function startModel(nPredict = 256, maxSteps = 0) {
+   const resolvedModel = resolveModelPath();
+   if (
+     llama &&
+@@ -802,7 +802,10 @@ function startModel(nPredict = 4096, maxSteps = 0) {
+     if (llama === child) handleStdout(data.toString("utf-8"));
+   });
+   child.stderr.on("data", (data: Buffer) => {
+-    if (llama === child) handleStderr(data.toString("utf-8"));
++    if (llama === child) {
++      process.stderr.write(data);
++      handleStderr(data.toString("utf-8"));
++    }
+   });
+   child.on("error", (error) => {
+     if (llama !== child) {
+@@ -849,7 +852,7 @@ app.get("/api/events", (req, res) => {
+ 
+ app.post("/api/chat", (req, res) => {
+   const message = String(req.body?.message ?? "").trim();
+-  const nPredict = Number(req.body?.nPredict ?? 4096);
++  const nPredict = Number(req.body?.nPredict ?? 256);
+   const maxSteps = Number(req.body?.maxSteps ?? 0);
+ 
+   if (!message) {
+@@ -858,7 +861,7 @@ app.post("/api/chat", (req, res) => {
+   }
+ 
+   try {
+-    startModel(Number.isFinite(nPredict) ? nPredict : 4096, Number.isFinite(maxSteps) ? maxSteps : 0);
++    startModel(Number.isFinite(nPredict) ? nPredict : 256, Number.isFinite(maxSteps) ? maxSteps : 0);
+     currentAssistant = null;
+     responseBuffer = "";
+     currentFrames = [];
+@@ -940,7 +943,7 @@ app.post("/api/models/load", async (req, res) => {
+   }
+   try {
+     setActiveModel(path.join(modelDir, variant.files[0].name));
+-    startModel(processNPredict ?? 4096, processMaxSteps ?? 0);
++    startModel(processNPredict ?? 256, processMaxSteps ?? 0);
+     void emitModels();
+     res.json({ ok: true });
+   } catch (error) {
+diff --git a/src/main.tsx b/src/main.tsx
+index 1af14dd..2057847 100644
+--- a/src/main.tsx
++++ b/src/main.tsx
+@@ -466,7 +466,7 @@ function App() {
+   const [status, setStatus] = useState<RuntimeStatus>(emptyStatus);
+   const [visual, setVisual] = useState<VisualState>(emptyVisual);
+   const [input, setInput] = useState("");
+-  const [nPredict, setNPredict] = useState(4096);
++  const [nPredict, setNPredict] = useState(256);
+   const [maxSteps, setMaxSteps] = useState(0);
+   const firstFrameAtRef = useRef<number | null>(null);
+   const [error, setError] = useState("");
+@@ -720,7 +720,7 @@ function App() {
+               onChange={(event) => setNPredict(Number(event.target.value))}
+             />
+             <label className="range-label" htmlFor="steps">
+-              Max steps / block <span>{maxSteps === 0 ? "auto (48)" : maxSteps}</span>
++              Max steps / block <span>{maxSteps === 0 ? "model default" : maxSteps}</span>
+             </label>
+             <input
+               id="steps"

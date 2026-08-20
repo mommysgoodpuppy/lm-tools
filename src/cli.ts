@@ -1,4 +1,7 @@
+import { killEverythingCommand, killEverythingUsage } from "./cleanup.ts";
 import { downloadCommand, downloadUsage } from "./download.ts";
+import { deployCommand, deployUsage } from "./deployment.ts";
+import { environmentCommand, environmentUsage } from "./agent_environment.ts";
 import { llamaCommand, llamaUsage } from "./llama.ts";
 import { proxyCommand, proxyUsage } from "./proxy.ts";
 import { tinygradCommand, tinygradUsage } from "./tinygrad.ts";
@@ -14,6 +17,9 @@ Usage:
 
 Commands:
   download  Resumable parallel download for large model files
+  deploy    Validate and run a declarative model deployment
+  env       Manage a declarative isolated agent environment
+  kill-everything  Stop all configured model services and inference processes
   llama     Launch llama-server with useful local defaults
   proxy     Adapt OpenAI-compatible traffic for clients such as VS Code
   tinygrad  Run the experimental vendored tinygrad LLM backend
@@ -28,6 +34,16 @@ export async function main(args: string[]): Promise<void> {
   switch (command) {
     case "download":
       await downloadCommand(commandArgs);
+      return;
+    case "deploy":
+      await deployCommand(commandArgs);
+      return;
+    case "env":
+    case "environment":
+      await environmentCommand(commandArgs);
+      return;
+    case "kill-everything":
+      await killEverythingCommand(commandArgs);
       return;
     case "llama":
     case "serve":
@@ -47,6 +63,12 @@ export async function main(args: string[]): Promise<void> {
       console.log(
         topic === "download"
           ? downloadUsage()
+          : topic === "deploy"
+          ? deployUsage()
+          : topic === "env" || topic === "environment"
+          ? environmentUsage()
+          : topic === "kill-everything"
+          ? killEverythingUsage()
           : topic === "llama" || topic === "serve"
           ? llamaUsage()
           : topic === "proxy"

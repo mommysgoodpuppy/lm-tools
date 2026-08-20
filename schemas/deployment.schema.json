@@ -1,0 +1,357 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lm-tools.local/schemas/deployment.schema.json",
+  "title": "lm-tools model deployment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "model", "runtime", "backend"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "name": { "$ref": "#/$defs/nonEmptyString" },
+    "model": { "$ref": "#/$defs/model" },
+    "runtime": { "$ref": "#/$defs/runtime" },
+    "resources": { "$ref": "#/$defs/resources" },
+    "backend": {
+      "description": "Discriminated backend configuration. Additional backend kinds extend this union.",
+      "oneOf": [
+        { "$ref": "#/$defs/llamaCppBackend" },
+        { "$ref": "#/$defs/llamaCppDiffusionBackend" }
+      ]
+    },
+    "compatibility": { "$ref": "#/$defs/compatibility" },
+    "exposure": { "$ref": "#/$defs/exposure" },
+    "clients": { "$ref": "#/$defs/clients" },
+    "services": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "$ref": "#/$defs/processService" },
+          { "$ref": "#/$defs/diffusionGemmaLabService" }
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "listen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": { "$ref": "#/$defs/nonEmptyString" },
+        "port": { "$ref": "#/$defs/port" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "path", "capabilities"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "size", "sha256"],
+          "properties": {
+            "url": { "type": "string", "pattern": "^https?://" },
+            "size": { "type": "integer", "minimum": 1 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+          }
+        },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tools", "vision", "reasoning", "streaming"],
+          "properties": {
+            "tools": { "type": "boolean" },
+            "vision": { "type": "boolean" },
+            "reasoning": { "type": "boolean" },
+            "streaming": { "type": "boolean" },
+            "supportedReasoningLevels": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "$ref": "#/$defs/nonEmptyString" }
+            },
+            "reasonLevelMap": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contextWindow", "maxOutputTokens"],
+      "properties": {
+        "contextWindow": { "type": "integer", "minimum": 1 },
+        "maxOutputTokens": { "type": "integer", "minimum": 1 },
+        "expectedVramMiB": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu"],
+      "properties": {
+        "gpu": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode"],
+              "properties": { "mode": { "const": "shared" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode", "conflictingExecutables", "shutdownGraceSeconds", "vram"],
+              "properties": {
+                "mode": { "const": "exclusive" },
+                "conflictingExecutables": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": { "$ref": "#/$defs/nonEmptyString" }
+                },
+                "shutdownGraceSeconds": { "type": "integer", "minimum": 1, "maximum": 60 },
+                "vram": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["devicePath", "minimumRemainingMiB"],
+                  "properties": {
+                    "devicePath": { "$ref": "#/$defs/nonEmptyString" },
+                    "minimumRemainingMiB": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "llamaCppBackend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "executable",
+        "listen",
+        "gpuLayers",
+        "flashAttention",
+        "kvCache",
+        "batch",
+        "parallel",
+        "ui",
+        "speculative"
+      ],
+      "properties": {
+        "kind": { "const": "llama.cpp" },
+        "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "listen": { "$ref": "#/$defs/listen" },
+        "gpuLayers": {
+          "oneOf": [
+            { "const": "all" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "flashAttention": { "type": "boolean" },
+        "kvCache": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "value"],
+          "properties": {
+            "key": { "$ref": "#/$defs/nonEmptyString" },
+            "value": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        },
+        "batch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["logical", "physical"],
+          "properties": {
+            "logical": { "type": "integer", "minimum": 1 },
+            "physical": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "parallel": { "type": "integer", "minimum": 1 },
+        "ui": { "type": "boolean" },
+        "speculative": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "const": "none" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "draftTokens"],
+              "properties": {
+                "kind": { "const": "mtp" },
+                "draftTokens": { "type": "integer", "minimum": 1 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "llamaCppDiffusionBackend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "executable", "device", "gpuLayers", "flashAttention", "fit"],
+      "properties": {
+        "kind": { "const": "llama.cpp-diffusion" },
+        "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "device": { "$ref": "#/$defs/nonEmptyString" },
+        "gpuLayers": {
+          "oneOf": [
+            { "const": "all" },
+            { "type": "integer", "minimum": 0 }
+          ]
+        },
+        "flashAttention": { "enum": ["auto", "on", "off"] },
+        "fit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "marginMiB"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "marginMiB": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["responsesProxy"],
+      "properties": {
+        "responsesProxy": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled"],
+              "properties": { "enabled": { "const": false } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "listen"],
+              "properties": {
+                "enabled": { "const": true },
+                "listen": { "$ref": "#/$defs/listen" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "exposure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tailscaleServe"],
+      "properties": {
+        "tailscaleServe": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled"],
+              "properties": { "enabled": { "const": false } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "executable", "httpsPort"],
+              "properties": {
+                "enabled": { "const": true },
+                "executable": { "$ref": "#/$defs/nonEmptyString" },
+                "httpsPort": { "$ref": "#/$defs/port" }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "clients": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vscode"],
+      "properties": {
+        "vscode": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled"],
+              "properties": { "enabled": { "const": false } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["enabled", "configPath", "providerName", "vendor", "reasoningEffort"],
+              "properties": {
+                "enabled": { "const": true },
+                "configPath": { "$ref": "#/$defs/nonEmptyString" },
+                "providerName": { "$ref": "#/$defs/nonEmptyString" },
+                "vendor": { "$ref": "#/$defs/nonEmptyString" },
+                "reasoningEffort": { "enum": ["none", "low", "medium", "high"] }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "processService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "executable", "args", "cwd", "environment", "ready"],
+      "properties": {
+        "kind": { "const": "process" },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "cwd": { "$ref": "#/$defs/nonEmptyString" },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "ready": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "timeoutSeconds"],
+          "properties": {
+            "url": { "type": "string", "pattern": "^https?://" },
+            "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+          }
+        }
+      }
+    },
+    "diffusionGemmaLabService": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "checkout", "listen", "readyTimeoutSeconds"],
+      "properties": {
+        "kind": { "const": "diffusiongemma-lab" },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "checkout": { "$ref": "#/$defs/nonEmptyString" },
+        "listen": { "$ref": "#/$defs/listen" },
+        "readyTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+      }
+    }
+  }
+}

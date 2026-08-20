@@ -1,0 +1,51 @@
+{
+  "$schema": "../schemas/base.schema.json",
+  "version": 1,
+  "clients": {
+    "reasoningLevels": {
+      "vscode": {
+        "none": "none",
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "high",
+        "max": null
+      },
+      "pi": {
+        "none": "off",
+        "minimal": "minimal",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      }
+    }
+  },
+  "emergencyStop": {
+    "userUnits": [
+      "lm-ps2-campaign.target",
+      "lm-ps2-console.service",
+      "lm-ps2-dashboard.service",
+      "lm-ps2-model-proxy.service",
+      "lm-ps2-worker.service",
+      "lm-qwen.service"
+    ],
+    "tailscaleServe": {
+      "executable": "/usr/bin/tailscale",
+      "httpsPorts": [443]
+    }
+  },
+  "resources": {
+    "gpu": {
+      "mode": "exclusive",
+      "conflictingExecutables": ["/usr/bin/llama-server"],
+      "shutdownGraceSeconds": 5,
+      "vram": {
+        "devicePath": "/sys/class/drm/card1/device",
+        "minimumRemainingMiB": 2048
+      }
+    }
+  }
+}
