@@ -11,3 +11,7 @@ __pycache__/
 /vendor/t3code/
 /logs/
 /api-jsons/
+
+# Local-only host networking and campaign orchestration
+scripts/configure_ps2_agent_ufw.sh
+scripts/ps2_campaign.sh
