@@ -1,0 +1,4 @@
+[submodule "vendor/t3code"]
+	path = vendor/t3code
+	url = https://github.com/mommysgoodpuppy/t3code.git
+	branch = lm-tools-campaign-observer

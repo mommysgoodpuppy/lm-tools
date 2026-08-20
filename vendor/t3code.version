@@ -1,5 +1,7 @@
-repository=https://github.com/pingdotgg/t3code.git
-commit=db0659fead9b7f29f4668c9ba3eb16702c2cff7f
+repository=https://github.com/mommysgoodpuppy/t3code.git
+upstream=https://github.com/pingdotgg/t3code.git
+branch=lm-tools-campaign-observer
+base_commit=db0659fead9b7f29f4668c9ba3eb16702c2cff7f
 package_version=0.0.33
 node_major=24
 pnpm_version=11.10.0

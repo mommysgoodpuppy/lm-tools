@@ -31,7 +31,9 @@ async function exists(path: string): Promise<boolean> {
 }
 
 if (!(await exists(join(target, "package.json")))) {
-  throw new Error(`Vendored T3 source is missing from ${target}`);
+  throw new Error(
+    `Vendored T3 source is missing from ${target}; run: git submodule update --init vendor/t3code`,
+  );
 }
 
 await run("corepack", ["pnpm@11.10.0", "install", "--frozen-lockfile", "--ignore-scripts"]);

@@ -8,7 +8,6 @@ __pycache__/
 /vendor/tinygrad/
 /vendor/diffusiongemma-lab/
 /vendor/llama.cpp-diffusiongemma/
-/vendor/t3code/
 /logs/
 /api-jsons/
 
