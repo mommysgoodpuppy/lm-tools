@@ -33,12 +33,17 @@ Chat Completions API: reasoning_effort: "medium"
 Qwen template input: chat_template_kwargs.reasoning_effort: "medium"
 ```
 
-llama.cpp converts the Responses field into the Chat Completions field. The installed version only
-implements special behavior for `none`; it accepts other values without forwarding them to Qwen's
-Jinja template.
+llama.cpp converts the Responses field into the Chat Completions field. Builds older than `b10434`
+implement special behavior only for `none`; they accept other values without forwarding them to
+Qwen's Jinja template.
 
-That failure is silent. Requests using `low`, `medium`, or `xhigh` succeed, but all produce the
-default `xhigh` prompt.
+That failure is silent. On such a build, requests using `low`, `medium`, or `xhigh` succeed, but all
+produce the default `xhigh` prompt.
+
+Upstream commit `7e4c0a96`, first released in `b10434` (2026-08-14), forwards the value itself. The
+server merges request-supplied `chat_template_kwargs` first and then overwrites `reasoning_effort`
+with an identically encoded value, so the proxy's write below is redundant on newer builds rather
+than conflicting, and stays correct across both.
 
 The model itself does support distinct levels. Rendering its template directly produces different
 prompts for:

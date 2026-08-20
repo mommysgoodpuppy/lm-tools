@@ -483,6 +483,13 @@ export function normalizeRequestBody(
     if (typeof effort === "string") {
       const wireEffort = reasoningEffortMap[effort] ?? effort;
       if (wireEffort !== "none") {
+        // The chat_template_kwargs write below is only load-bearing on llama.cpp builds
+        // older than b10434. Those accept reasoning_effort but drop it before the template,
+        // so the effort never reaches Qwen. From b10434 (upstream 7e4c0a96) the server
+        // merges request kwargs first and then overwrites reasoning_effort itself with an
+        // identical dumped value, making this a no-op rather than a conflict. "none" is
+        // excluded because every build supporting it maps "none" to enable_thinking=false
+        // and erases the kwarg. The wireEffort mapping itself is always required.
         const existing = request.chat_template_kwargs;
         const chatTemplateKwargs = existing !== null && typeof existing === "object" &&
             !Array.isArray(existing)
