@@ -142,7 +142,13 @@ export async function runVscodeStack(
 
   console.log(
     `VS Code stack: context=${options.context}, KV=${options.cacheTypeK}/${options.cacheTypeV}, ` +
-      `MTP=${options.mtpDraftTokens || "off"}`,
+      `speculative=${
+        options.dflashDraftTokens > 0
+          ? `DFlash/${options.dflashDraftTokens}`
+          : options.mtpDraftTokens > 0
+          ? `MTP/${options.mtpDraftTokens}`
+          : "off"
+      }`,
   );
   if (options.dryRun) {
     console.log([options.server, ...buildLlamaArgs(options)].map(shellQuote).join(" "));
@@ -160,6 +166,8 @@ export async function runVscodeStack(
     cacheTypeK: options.cacheTypeK,
     cacheTypeV: options.cacheTypeV,
     mtpDraftTokens: options.mtpDraftTokens,
+    dflashDraftTokens: options.dflashDraftTokens,
+    draftModel: options.draftModel,
   });
   const progress = new LlamaPromptProgress();
   const child = spawnLlama(options, "piped");

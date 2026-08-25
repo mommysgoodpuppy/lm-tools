@@ -1,5 +1,0 @@
-frontend_repository=https://github.com/filliptm/diffusiongemma-lab.git
-frontend_commit=e707fb991f739087f347711f3571b0ec25aa11f8
-llama_repository=https://github.com/danielhanchen/llama.cpp.git
-llama_commit=daca8075d871483545dd85d58ce11970b304b541
-upstream_pr=https://github.com/ggml-org/llama.cpp/pull/24423

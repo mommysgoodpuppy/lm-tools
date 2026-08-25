@@ -35,6 +35,28 @@ All proxy-generated reasoning uses the `lm-tools-system-reasoning-<kind>-…` it
 proxy removes those items—and any merged legacy prompt-progress prefix—from later inbound history,
 so UI-only diagnostics can persist in VS Code without becoming model context.
 
+Captured requests can be replayed through either API shape with comparable wall-time and VRAM
+sampling. Chat Completions mode converts role-based Responses messages and function tools, while
+rejecting unsupported input item types instead of silently changing the prompt:
+
+```bash
+deno task lm benchmark logs/requests/example.json \
+  --api chat-completions \
+  --url http://127.0.0.1:8000/v1/chat/completions \
+  --max-output-tokens 512 \
+  --vram-device /sys/class/drm/card1/device \
+  --output results/tinygrad-long.json
+```
+
+`--max-input-chars N` derives deterministic shorter probes from a captured role-message request.
+This is useful for multi-fidelity optimization campaigns; retain the endpoint's reported prompt
+token count as a workload-integrity gate. The calibrated Qwen tinygrad funnel and same-quant Vulkan
+finish line are documented in [`docs/qwen-tinygrad-campaign.md`](docs/qwen-tinygrad-campaign.md).
+The Codex worker runs four fresh, artifact-gated phases—20-minute discovery, up-to-20-minute
+implementation, 10-minute verification, and 5-minute handoff—at low reasoning effort. Discovery may
+request a host profile instead of guessing and has the exact llama.cpp Vulkan baseline source as a
+reference checkout.
+
 ## Declarative deployments
 
 [`deployments/qwen-vscode.json`](deployments/qwen-vscode.json) is the canonical deployment for this
@@ -49,9 +71,9 @@ snippets use the machine's MagicDNS HTTPS URL. The inherited [`config/base.json`
 defines the machine-wide GPU policy: exclusive ownership, conflicting executables, bounded shutdown,
 and minimum VRAM that must remain free. Each model declares its expected residency through
 `runtime.expectedVramMiB`. Exclusive deployments hold a runtime lease, evict stale conflicts, and
-refuse to load unless expected model use plus the base safety reserve fits in currently free dedicated
-VRAM. A deployment should override the base with `resources.gpu.mode: "shared"` only for an
-intentionally optimized multi-model setup.
+refuse to load unless expected model use plus the base safety reserve fits in currently free
+dedicated VRAM. A deployment should override the base with `resources.gpu.mode: "shared"` only for
+an intentionally optimized multi-model setup.
 
 ```bash
 # Validate JSON Schema, model/executable paths, and every emitted llama.cpp long option.
@@ -80,11 +102,63 @@ not part of the deployment format.
 
 Model entries may also declare an immutable download source with an expected byte size and SHA-256.
 `lm deploy CONFIG --fetch` uses the resumable downloader and refuses a changed or corrupt artifact.
-Hugging Face artifacts default to sixteen concurrent 64 MiB ranges instead of the generic eight;
-this saturated the current connection at about 28.5 MB/s during the 16.81 GB DiffusionGemma fetch.
-Deployments can declare auxiliary local processes with their executable, working directory,
-environment, and HTTP readiness probe; lm-tools owns their lifecycle together with the backend and
-persists both stdout and stderr in the normal diagnostic log.
+Matched speculative draft models use the same pinned-source and integrity contract. Hugging Face
+artifacts default to sixteen concurrent 64 MiB ranges instead of the generic eight; this saturated
+the current connection at about 28.5 MB/s during the 16.81 GB DiffusionGemma fetch. Deployments can
+declare auxiliary local processes with their executable, working directory, environment, and HTTP
+readiness probe; lm-tools owns their lifecycle together with the backend and persists both stdout
+and stderr in the normal diagnostic log.
+
+Backends built from an unmerged PR or a local patch may declare a `vendor` reference naming a
+tracked manifest and one of its output artifacts. Deployment checks then verify the checkout
+revision, origin, declared patches, absence of unexpected source changes, and required artifact
+before inspecting the executable.
+
+## Declarative vendor builds
+
+Files under [`vendors/`](vendors/) describe reproducible source builds independently of their model
+deployment. A manifest can coordinate multiple Git repositories pinned by full commit SHA, apply
+ordered tracked patches, run argv-based build steps in explicit working directories, and publish
+named file, directory, or executable artifacts. Strings support `${root}`, `${manifest}`, and
+`${checkout.NAME}` interpolation.
+
+```bash
+# Inspect without changing the workspace.
+deno task lm vendor vendors/llama-dflash2.json --dry-run
+
+# Materialize missing checkouts, apply patches, build, and verify outputs.
+deno task lm vendor vendors/llama-dflash2.json
+
+# Detect revision, origin, patch, source-tree, or artifact drift.
+deno task lm vendor vendors/llama-dflash2.json --check
+```
+
+The Qwen tinygrad campaign uses the same mechanism for its pinned Codex harness. This build carries
+the local-provider compaction tool-manifest fix and can be reproduced with:
+
+```bash
+deno task codex:vendor
+deno task codex:smoke-compaction
+deno task codex:smoke-semantic-compaction
+```
+
+The semantic smoke gives Qwen a direct app-server `compact_context` tool, verifies that lm-tools
+turns the model request into native Codex compaction, and checks that the same work session resumes
+and can still use tools. No MCP server is involved.
+
+The optional Pi RPC harness is pinned and packaged independently. Its smoke test exercises a real
+Qwen tool call through the no-GPU worker container and reports Pi's authoritative token totals:
+
+```bash
+deno task pi:vendor
+deno task lm env environments/qwen-tinygrad-pi.json --apply
+deno task pi:smoke-rpc
+```
+
+The current manifests cover the tinygrad RDNA3 Qwen PR, an isolated candidate for the experimental
+tinygrad RDNA3 compiler-backend PR, the DFlash 2 llama.cpp fork, and the two-checkout DiffusionGemma
+frontend/runner build. Manifests are trusted local code because their build steps execute commands;
+review changes to them just as carefully as a shell script.
 
 ## Disposable agent environments
 
@@ -183,12 +257,11 @@ animated scrolling. The console also samples llama.cpp's read-only `/slots` tele
 shows actual context occupancy against the backend's 131K limit, while uncached prompt evaluation is
 rendered as a synthetic progress event during otherwise silent command-to-token gaps. Cached tokens
 are reported separately, and the synthetic generation state yields to real streamed reasoning or
-message deltas as soon as they arrive. The PS2
-worker uses Codex app-server over its stdio JSONL transport, and the observer understands the raw
-`item/*` lifecycle, agent/reasoning text deltas, command-output deltas, plan updates, errors, and
-live token-usage notifications. The compatibility `exec-json` transport remains available for
-simpler environments, but only reports aggregate command output when a command completes. Neither
-transport requires pairing the viewer.
+message deltas as soon as they arrive. The PS2 worker uses Codex app-server over its stdio JSONL
+transport, and the observer understands the raw `item/*` lifecycle, agent/reasoning text deltas,
+command-output deltas, plan updates, errors, and live token-usage notifications. The compatibility
+`exec-json` transport remains available for simpler environments, but only reports aggregate command
+output when a command completes. Neither transport requires pairing the viewer.
 
 The MIT-licensed upstream source is vendored directly under `vendor/t3code/` and modified as normal
 source instead of maintained as a growing patch stack. The original license notice remains in the
@@ -328,18 +401,36 @@ The proxy has no authentication. Keep port 1235 on a trusted network or change t
 deno task lm proxy --listen-host 127.0.0.1
 ```
 
-For VS Code on this machine, the combined command starts Qwen at 128K with the measured
-K=q8_0/V=q4_0 cache balance and native MTP drafting at `n-max=2`, waits for llama-server to become
-healthy, and then starts a localhost-only proxy:
+For VS Code on this machine, the canonical deployment starts Unsloth's Qwen3.8-27B `UD-Q4_K_XL` at
+100K with the measured K=q8_0/V=q4_0 cache balance and native MTP drafting at `n-max=2`, waits for
+llama-server to become healthy, and then starts a localhost-only proxy:
 
 ```bash
-deno task lm vscode
+deno task lm deploy deployments/qwen-vscode.json --fetch
+deno task lm deploy deployments/qwen-vscode.json
 ```
 
-Use `--mtp 0` to disable MTP or another integer to benchmark a different draft width. Against a
-captured 17,907-token VS Code agent request on the RX 7900 XTX, baseline decode was 36.69 tok/s; MTP
-widths 1, 2, and 3 reached 53.04, 58.34, and 57.83 tok/s respectively. A confidence-gated
-`n-max=16`, `p-min=0.8` configuration reached only 42.45 tok/s on this reasoning-heavy workload.
+An experimental deployment uses the official Q4_K_M DFlash 2 drafter at width four. Its
+implementation is pinned from the still-unmerged llama.cpp PR rather than replacing the system
+binary:
+
+```bash
+deno task dflash2:vendor
+deno task lm deploy deployments/qwen-vscode-dflash2.json --fetch
+deno task lm deploy deployments/qwen-vscode-dflash2.json
+```
+
+DFlash 2 is lossless speculative decoding: it changes decode speed, not the target model's output
+distribution. On the captured long agent request it did not beat MTP on this GPU, so it remains an
+explicit experiment rather than the default. See
+[`docs/qwen38-quant-dflash2.md`](docs/qwen38-quant-dflash2.md) for the quant decision, hardware
+constraints, reproducible artifacts, and measurements.
+
+The older standalone `lm vscode` command still supports `--mtp 0` to disable MTP or another integer
+to benchmark a different draft width. Against a captured 17,907-token VS Code agent request on the
+RX 7900 XTX, baseline decode was 36.69 tok/s; MTP widths 1, 2, and 3 reached 53.04, 58.34, and 57.83
+tok/s respectively. A confidence-gated `n-max=16`, `p-min=0.8` configuration reached only 42.45
+tok/s on this reasoning-heavy workload.
 
 This Qwen generation uses hybrid DeltaNet/recurrent layers. On the RX 7900 XTX, llama.cpp's Vulkan
 backend is required for practical prompt processing: the b10355 Vulkan build processed a 20K-token
@@ -348,8 +439,11 @@ backend is required for practical prompt processing: the b10355 Vulkan build pro
 ## Experimental tinygrad backend
 
 The tinygrad checkout is intentionally ignored rather than stored directly or added as a submodule.
-`vendor/tinygrad.version` pins the upstream commit and a small tracked patch preserves the recurrent
-prefill experiment. Bootstrap it after cloning lm-tools:
+[`vendors/tinygrad-rdna3-qwen.json`](vendors/tinygrad-rdna3-qwen.json) pins PR 17512's exact head
+and applies the tracked compatibility/runtime-control patch. The PR adds RDNA3 kernels for
+IQ4_XS/Q5_K/Q6_K weights, quantized KV attention, Gated DeltaNet prefill, and decode. The local
+patch adds the Q3_K and IQ4_NL decoding needed by Unsloth's mixed artifacts and fixes graph handling
+of captured static weight slots. Bootstrap it after cloning lm-tools:
 
 ```bash
 deno task tinygrad:vendor
@@ -358,22 +452,38 @@ deno task tinygrad:vendor
 The runner uses tinygrad's native `AMD` backend directly—ROCm Python packages are not required:
 
 ```bash
-# Defaults to the local Qwen3.8-27B Q4_K_M file on this machine.
+# Defaults to the non-dynamic Qwen3.8-27B IQ4_XS, matching tiny corp's fast path.
 deno task lm tinygrad --max_context 4096 --benchmark 5
 
 # Exercise chunked recurrent prefill; upstream currently forces a chunk size of one.
 deno task lm tinygrad --recurrent-chunk 16 --max_context 4096 --serve 8000
 ```
 
-Qwen3.5-0.8B and the local Qwen3.8-27B both run correctly on the RX 7900 XTX. Untuned steady-state
-decode measured about 151 tok/s and 1.9 tok/s respectively. Chunking recurrent prefill by 16 raised
-a repeated 133-token 0.8B probe from 164 to 667 tok/s, but the 27B model managed only about 11 tok/s
-on a repeated 173-token probe. It is therefore functional but not yet competitive with llama.cpp
-Vulkan for interactive use or large VS Code prompts.
+The earlier upstream baseline ran Qwen3.8-27B correctly but reached only about 1.9 decode tok/s and
+11 prefill tok/s. Those numbers do not describe the pinned RDNA3 PR; its measured results and the
+exact model/context settings live in the Qwen design record below.
 
-Do not enable `JITBEAM` on this machine for now: searching 27B kernels hit an AMD queue timeout and
-caused a hard reset. The recurrent chunk override is opt-in and retains tinygrad's upstream
-chunk-size-one default.
+The local static-slot patch keeps the fast batched `JIT=1` path usable; `--jit 2` remains available
+as a diagnostic unbatched mode. Do not enable `JITBEAM` on this machine for now: searching 27B
+kernels hit an AMD queue timeout and caused a hard reset. The recurrent chunk override is opt-in and
+retains tinygrad's upstream chunk-size-one default.
+
+The selected tinygrad artifact is the archived, non-dynamic Qwen3.8-27B `IQ4_XS` (SHA-256
+`9fd40d7036f5e0918e20aaeebf11468fafd06bb53d4d980eef6bb7e4e4ace666`). It matches the tensor formats
+accelerated by PR 17512. At 102,400 configured context it measured 44.3--44.7 decode tok/s on a
+shallow benchmark. Replaying a captured 61,514-token coding request measured 192 prefill tok/s, 28
+decode tok/s, 338.92 seconds server-side, and 20,943 MiB peak whole-device VRAM. The Unsloth
+Dynamic-v3 `UD-IQ4_XS` can run with the local format fixes, but its mixed tensor formats fall back
+to generic kernels and reached only 2.6--3.7 decode tok/s; it is therefore not a tinygrad deployment
+candidate.
+
+[`vendors/tinygrad-rdna3-backend.json`](vendors/tinygrad-rdna3-backend.json) separately pins PR
+16668's experimental RDNA3 compiler backend. It is intentionally not combined with the working Qwen
+checkout. The backend passed all 21 applicable `test/test_tiny.py` smoke tests on this 7900 XTX,
+despite an upstream Strix Halo crash report. However, transplanting PR 17512's Qwen kernel modules
+gave five compile-time failures out of six tests under `DEV=AMD:RDNA3`; the normal `DEV=AMD`
+renderer passed all six. Combining the PRs therefore requires new RDNA3 instruction
+selection/register lowering, not merely resolving their two textual merge conflicts.
 
 To make `lm` available globally:
 

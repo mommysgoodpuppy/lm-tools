@@ -19,6 +19,8 @@ export interface LlamaOptions {
   ubatchSize: number;
   parallel: number;
   mtpDraftTokens: number;
+  dflashDraftTokens: number;
+  draftModel?: string;
   mmproj?: string;
   webui: boolean;
   dryRun: boolean;
@@ -80,6 +82,7 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
     ubatchSize: 256,
     parallel: 1,
     mtpDraftTokens: parseNonNegativeInteger(env.MTP_DRAFT_TOKENS ?? "0", "MTP_DRAFT_TOKENS"),
+    dflashDraftTokens: 0,
     webui: true,
     dryRun: false,
     serverArgs,
@@ -157,6 +160,12 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
 }
 
 export function buildLlamaArgs(options: LlamaOptions): string[] {
+  if (options.mtpDraftTokens > 0 && options.dflashDraftTokens > 0) {
+    throw new Error("MTP and DFlash speculative decoding cannot be enabled together");
+  }
+  if (options.dflashDraftTokens > 0 && !options.draftModel) {
+    throw new Error("DFlash speculative decoding requires a draft model");
+  }
   return [
     "--model",
     options.model,
@@ -186,6 +195,16 @@ export function buildLlamaArgs(options: LlamaOptions): string[] {
     ...(options.mtpDraftTokens > 0
       ? ["--spec-type", "draft-mtp", "--spec-draft-n-max", String(options.mtpDraftTokens)]
       : []),
+    ...(options.dflashDraftTokens > 0
+      ? [
+        "--model-draft",
+        options.draftModel!,
+        "--spec-type",
+        "draft-dflash",
+        "--spec-draft-n-max",
+        String(options.dflashDraftTokens),
+      ]
+      : []),
     ...(options.mmproj ? ["--mmproj", options.mmproj] : []),
     ...options.serverArgs,
   ];
@@ -214,6 +233,7 @@ export async function validateLlamaOptions(options: LlamaOptions): Promise<void>
   await assertFile(options.model, "Model");
   await assertFile(options.server, "llama-server", true);
   if (options.mmproj) await assertFile(options.mmproj, "Vision projector");
+  if (options.draftModel) await assertFile(options.draftModel, "Draft model");
 }
 
 export function spawnLlama(

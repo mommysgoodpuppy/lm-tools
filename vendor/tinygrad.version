@@ -1,3 +1,0 @@
-repository=https://github.com/tinygrad/tinygrad.git
-commit=af2a43c850ed30f27dda4bde291ad775ff82615d
-local_patch=patches/tinygrad-recurrent-chunk.patch

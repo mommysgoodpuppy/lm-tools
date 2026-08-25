@@ -1,0 +1,40 @@
+{
+  "$schema": "../schemas/vendor.schema.json",
+  "version": 1,
+  "name": "codex-local-compact",
+  "description": "Pinned Codex 0.148.0 with local-provider compaction preserving the active tool manifest",
+  "checkouts": [
+    {
+      "name": "codex",
+      "repository": "https://github.com/openai/codex.git",
+      "revision": "3ba0f711642a888aec92a611a3f3b2211157ff89",
+      "upstream": "https://github.com/openai/codex/issues/37305",
+      "path": "../vendor/codex-local-compact",
+      "patches": [
+        "../patches/codex-0.148-lockfile.patch",
+        "../patches/codex-local-compaction-tools.patch"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "name": "build patched Codex CLI",
+      "run": [
+        "cargo",
+        "build",
+        "--manifest-path",
+        "${checkout.codex}/codex-rs/Cargo.toml",
+        "-p",
+        "codex-cli",
+        "--release"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "codex",
+      "path": "${checkout.codex}/codex-rs/target/release/codex",
+      "kind": "executable"
+    }
+  ]
+}

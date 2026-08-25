@@ -1,0 +1,22 @@
+{
+  "$schema": "../schemas/vendor.schema.json",
+  "version": 1,
+  "name": "tinygrad-rdna3-backend",
+  "description": "Isolated candidate checkout for tinygrad PR 16668's experimental RDNA3 compiler backend",
+  "checkouts": [
+    {
+      "name": "tinygrad",
+      "repository": "https://github.com/GabrielNakamoto/tinygrad.git",
+      "revision": "eb213a22c03255a02e225cd0b580251511b560b1",
+      "upstream": "https://github.com/tinygrad/tinygrad/pull/16668",
+      "path": "../vendor/tinygrad-rdna3-backend"
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "python-package",
+      "path": "${checkout.tinygrad}/tinygrad",
+      "kind": "directory"
+    }
+  ]
+}

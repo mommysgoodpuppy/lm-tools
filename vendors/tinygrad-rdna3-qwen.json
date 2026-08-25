@@ -1,0 +1,23 @@
+{
+  "$schema": "../schemas/vendor.schema.json",
+  "version": 1,
+  "name": "tinygrad-rdna3-qwen",
+  "description": "tinygrad PR 17512 pinned for its RDNA3 Qwen quant, attention, and recurrent-prefill kernels",
+  "checkouts": [
+    {
+      "name": "tinygrad",
+      "repository": "https://github.com/tinygrad/tinygrad.git",
+      "revision": "2015a4f4a79a3eb382b91e1cc506a130ace7deb2",
+      "upstream": "https://github.com/tinygrad/tinygrad/pull/17512",
+      "path": "../vendor/tinygrad",
+      "patches": ["../patches/tinygrad-qwen-runtime-controls.patch"]
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "python-package",
+      "path": "${checkout.tinygrad}/tinygrad",
+      "kind": "directory"
+    }
+  ]
+}

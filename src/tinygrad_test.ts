@@ -17,8 +17,14 @@ Deno.test("builds the native AMD tinygrad Qwen command", () => {
     "4096",
   ]);
   assertEquals(command.env.DEV, "AMD");
+  assertEquals(command.env.JIT, "1");
   assertEquals(command.env.PYTHONPATH, "/repo/vendor/tinygrad");
   assertEquals(command.env.TINYGRAD_RECURRENT_CHUNK_SIZE, "16");
+});
+
+Deno.test("allows overriding tinygrad JIT mode", () => {
+  const options = parseTinygradArgs(["--jit", "3", "model.gguf"], {});
+  assertEquals(options.jit, 3);
 });
 
 Deno.test("uses an explicitly configured default tinygrad model", () => {

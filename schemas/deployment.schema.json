@@ -52,16 +52,7 @@
         "id": { "$ref": "#/$defs/nonEmptyString" },
         "name": { "$ref": "#/$defs/nonEmptyString" },
         "path": { "$ref": "#/$defs/nonEmptyString" },
-        "source": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["url", "size", "sha256"],
-          "properties": {
-            "url": { "type": "string", "pattern": "^https?://" },
-            "size": { "type": "integer", "minimum": 1 },
-            "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
-          }
-        },
+        "source": { "$ref": "#/$defs/artifactSource" },
         "capabilities": {
           "type": "object",
           "additionalProperties": false,
@@ -85,6 +76,25 @@
             }
           }
         }
+      }
+    },
+    "artifactSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "size", "sha256"],
+      "properties": {
+        "url": { "type": "string", "pattern": "^https?://" },
+        "size": { "type": "integer", "minimum": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+      }
+    },
+    "vendorBuild": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["manifest", "artifact"],
+      "properties": {
+        "manifest": { "$ref": "#/$defs/nonEmptyString" },
+        "artifact": { "$ref": "#/$defs/nonEmptyString" }
       }
     },
     "runtime": {
@@ -156,6 +166,7 @@
       "properties": {
         "kind": { "const": "llama.cpp" },
         "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "vendor": { "$ref": "#/$defs/vendorBuild" },
         "listen": { "$ref": "#/$defs/listen" },
         "gpuLayers": {
           "oneOf": [
@@ -200,6 +211,24 @@
                 "kind": { "const": "mtp" },
                 "draftTokens": { "type": "integer", "minimum": 1 }
               }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "model", "draftTokens"],
+              "properties": {
+                "kind": { "const": "dflash" },
+                "model": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "source"],
+                  "properties": {
+                    "path": { "$ref": "#/$defs/nonEmptyString" },
+                    "source": { "$ref": "#/$defs/artifactSource" }
+                  }
+                },
+                "draftTokens": { "type": "integer", "minimum": 1 }
+              }
             }
           ]
         }
@@ -212,6 +241,7 @@
       "properties": {
         "kind": { "const": "llama.cpp-diffusion" },
         "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "vendor": { "$ref": "#/$defs/vendorBuild" },
         "device": { "$ref": "#/$defs/nonEmptyString" },
         "gpuLayers": {
           "oneOf": [

@@ -26,6 +26,10 @@
   "backend": {
     "kind": "llama.cpp-diffusion",
     "executable": "/home/ellie/git/lm-tools/vendor/llama.cpp-diffusiongemma/build-vulkan/bin/llama-diffusion-cli",
+    "vendor": {
+      "manifest": "../vendors/diffusiongemma.json",
+      "artifact": "llama-diffusion-cli"
+    },
     "device": "Vulkan0",
     "gpuLayers": "all",
     "flashAttention": "auto",

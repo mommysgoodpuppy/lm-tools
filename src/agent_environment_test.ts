@@ -1,6 +1,7 @@
 import { assertEquals } from "jsr:@std/assert@1/equals";
 import {
   buildApplyPlan,
+  buildHostServiceCommands,
   buildProvisionCommand,
   buildSeedCommands,
   loadAgentEnvironment,
@@ -16,6 +17,71 @@ Deno.test("loads the PS2 Linux Incus environment", async () => {
   assertEquals(environment.model.config.model.id, "qwen3.8-27b");
   assertEquals(environment.config.guest.packages.includes("xorg-server-xvfb"), true);
   assertEquals(environment.config.worker?.transport, "app-server");
+});
+
+Deno.test("loads the no-GPU Qwen tinygrad campaign environment", async () => {
+  const environment = await loadAgentEnvironment(`${PROJECT_ROOT}/environments/qwen-tinygrad.json`);
+  assertEquals(environment.config.backend.instance, "lm-qwen-tinygrad");
+  assertEquals(environment.config.guest.workspace, "/home/ellie/git/tinygrad");
+  assertEquals(environment.config.worker?.transport, "app-server");
+  assertEquals(environment.config.worker?.wrapUpSeconds, 43200);
+  assertEquals(environment.config.worker?.compaction, undefined);
+  assertEquals(environment.config.worker?.phases?.map((phase) => phase.name), [
+    "discovery",
+    "implementation",
+    "verification",
+    "handoff",
+  ]);
+  assertEquals(environment.config.worker?.phaseControl, {
+    requestPath: "/home/ellie/campaign/qwen-tinygrad/PHASE_REQUEST.json",
+    maxTransitions: 64,
+    maxWallSeconds: 43200,
+    finalPhase: "handoff",
+  });
+  assertEquals(environment.config.worker?.turnSummary, {
+    endpoint: "http://127.0.0.1:1235/v1/chat/completions",
+    model: "qwen3.8-27b",
+    reasoningEffort: "low",
+    timeoutSeconds: 180,
+    maxInputChars: 48000,
+    maxOutputTokens: 1400,
+  });
+  assertEquals(environment.config.backend.modelAccess.port, 1245);
+  assertEquals(environment.config.hostServices?.length, 5);
+  const hostServices = buildHostServiceCommands(environment);
+  assertEquals(hostServices.some((command) => command.args.includes("daemon-reload")), true);
+  assertEquals(
+    hostServices.some((command) => command.args.includes("lm-qwen-tinygrad-console.service")),
+    true,
+  );
+  const refreshServices = buildHostServiceCommands(environment, true);
+  assertEquals(
+    refreshServices.some((command) =>
+      command.args.includes("restart") &&
+      command.args.includes("lm-qwen-tinygrad-console.service")
+    ),
+    true,
+  );
+  assertEquals(
+    refreshServices.some((command) =>
+      command.args.includes("restart") && command.args.includes("lm-qwen-tinygrad-agent.service")
+    ),
+    false,
+  );
+  assertEquals(
+    buildApplyPlan(environment).some((command) => command.args.includes("gpu")),
+    false,
+  );
+});
+
+Deno.test("loads the Pi RPC alternative for the Qwen tinygrad worker", async () => {
+  const environment = await loadAgentEnvironment(
+    `${PROJECT_ROOT}/environments/qwen-tinygrad-pi.json`,
+  );
+  assertEquals(environment.config.backend.instance, "lm-qwen-tinygrad");
+  assertEquals(environment.config.worker?.transport, "pi-rpc");
+  assertEquals(environment.config.worker?.command?.includes("--no-session"), true);
+  assertEquals(environment.config.guest.packages.includes("nodejs-lts-krypton"), true);
 });
 
 Deno.test("guest provisioning is declared and noninteractive", async () => {

@@ -17,6 +17,7 @@ import {
   terminateChild,
 } from "./process_manager.ts";
 import { runVscodeStack } from "./vscode.ts";
+import { checkVendorManifest, loadVendorManifest, vendorArtifact } from "./vendor.ts";
 
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const DEPLOYMENT_SCHEMA = `${PROJECT_ROOT}/schemas/deployment.schema.json`;
@@ -86,6 +87,7 @@ interface ModelDeployment {
 interface LlamaCppBackend {
   kind: "llama.cpp";
   executable: string;
+  vendor?: { manifest: string; artifact: string };
   listen: ListenAddress;
   gpuLayers: "all" | number;
   flashAttention: boolean;
@@ -93,12 +95,20 @@ interface LlamaCppBackend {
   batch: { logical: number; physical: number };
   parallel: number;
   ui: boolean;
-  speculative: { kind: "none" } | { kind: "mtp"; draftTokens: number };
+  speculative:
+    | { kind: "none" }
+    | { kind: "mtp"; draftTokens: number }
+    | {
+      kind: "dflash";
+      model: { path: string; source: { url: string; size: number; sha256: string } };
+      draftTokens: number;
+    };
 }
 
 interface LlamaCppDiffusionBackend {
   kind: "llama.cpp-diffusion";
   executable: string;
+  vendor?: { manifest: string; artifact: string };
   device: string;
   gpuLayers: "all" | number;
   flashAttention: "auto" | "on" | "off";
@@ -190,7 +200,7 @@ Validate and run a complete local-model deployment. CONFIG defaults to:
 Options:
   --check        Validate the schema, files, and installed backend flags
   --dry-run      Print the resolved process and generated client configuration
-  --fetch        Download or verify the declared model artifact, then exit
+  --fetch        Download or verify all declared model artifacts, then exit
   --client-only  Reconcile declared client configuration without starting services
   --help         Show this help`;
 }
@@ -287,6 +297,12 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
       ubatchSize: backend.batch.physical,
       parallel: backend.parallel,
       mtpDraftTokens: backend.speculative.kind === "mtp" ? backend.speculative.draftTokens : 0,
+      dflashDraftTokens: backend.speculative.kind === "dflash"
+        ? backend.speculative.draftTokens
+        : 0,
+      draftModel: backend.speculative.kind === "dflash"
+        ? backend.speculative.model.path
+        : undefined,
       webui: backend.ui,
       dryRun: false,
       serverArgs: [],
@@ -545,6 +561,23 @@ async function validateInstalledBackend(
   requireModel = true,
 ): Promise<void> {
   const backend = deployment.config.backend;
+  if (backend.vendor) {
+    const manifestPath = resolve(dirname(deployment.sourcePath), backend.vendor.manifest);
+    const vendor = await loadVendorManifest(manifestPath);
+    try {
+      await checkVendorManifest(vendor);
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : error}; run lm vendor ${manifestPath}`,
+      );
+    }
+    const declaredArtifact = vendorArtifact(vendor, backend.vendor.artifact);
+    if (resolve(backend.executable) !== resolve(declaredArtifact)) {
+      throw new Error(
+        `Backend executable ${backend.executable} does not match vendor artifact ${declaredArtifact}`,
+      );
+    }
+  }
   if (requireModel) {
     try {
       await assertFile(deployment.config.model.path, "Model");
@@ -555,6 +588,17 @@ async function validateInstalledBackend(
           error instanceof Error ? error.message : error
         }; run lm deploy ${deployment.sourcePath} --fetch`,
       );
+    }
+    if (backend.kind === "llama.cpp" && backend.speculative.kind === "dflash") {
+      try {
+        await assertFile(backend.speculative.model.path, "Draft model");
+      } catch (error) {
+        throw new Error(
+          `${
+            error instanceof Error ? error.message : error
+          }; run lm deploy ${deployment.sourcePath} --fetch`,
+        );
+      }
     }
   }
   await assertFile(backend.executable, backend.kind, true);
@@ -611,9 +655,11 @@ async function validateInstalledBackend(
   }
 }
 
-async function fetchModelArtifact(deployment: ResolvedDeployment): Promise<void> {
-  const { path, source } = deployment.config.model;
-  if (!source) throw new Error(`Model ${deployment.config.model.id} has no source to fetch`);
+async function fetchArtifact(
+  label: string,
+  path: string,
+  source: { url: string; size: number; sha256: string },
+): Promise<void> {
   try {
     await Deno.stat(path);
     console.log(`Verifying existing model artifact: ${path}`);
@@ -623,7 +669,7 @@ async function fetchModelArtifact(deployment: ResolvedDeployment): Promise<void>
   } catch (error) {
     if (!(error instanceof Deno.errors.NotFound)) throw error;
   }
-  console.log(`Fetching model artifact: ${source.url}`);
+  console.log(`Fetching ${label}: ${source.url}`);
   const url = new URL(source.url);
   await downloadFile({
     url,
@@ -633,6 +679,20 @@ async function fetchModelArtifact(deployment: ResolvedDeployment): Promise<void>
     expectedSize: source.size,
     sha256: source.sha256,
   });
+}
+
+async function fetchModelArtifacts(deployment: ResolvedDeployment): Promise<void> {
+  const { path, source } = deployment.config.model;
+  if (!source) throw new Error(`Model ${deployment.config.model.id} has no source to fetch`);
+  await fetchArtifact("model artifact", path, source);
+  const backend = deployment.config.backend;
+  if (backend.kind === "llama.cpp" && backend.speculative.kind === "dflash") {
+    await fetchArtifact(
+      "DFlash draft artifact",
+      backend.speculative.model.path,
+      backend.speculative.model.source,
+    );
+  }
 }
 
 function deploymentHttpEndpoint(deployment: ResolvedDeployment): ListenAddress {
@@ -939,7 +999,7 @@ export async function deployCommand(args: string[]): Promise<void> {
     throw new Error("Use only one of --check, --dry-run, --fetch, or --client-only");
   }
   if (fetch) {
-    await fetchModelArtifact(deployment);
+    await fetchModelArtifacts(deployment);
     return;
   }
   await validateInstalledBackend(deployment, !dryRun);

@@ -6,8 +6,12 @@ results/
 __pycache__/
 *.pyc
 /vendor/tinygrad/
+/vendor/tinygrad-rdna3-backend/
 /vendor/diffusiongemma-lab/
 /vendor/llama.cpp-diffusiongemma/
+/vendor/llama.cpp-dflash2/
+/vendor/pi/
+/vendor/pi-runtime/
 /logs/
 /api-jsons/
 

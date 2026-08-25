@@ -30,7 +30,9 @@
       "lm-ps2-dashboard.service",
       "lm-ps2-model-proxy.service",
       "lm-ps2-worker.service",
-      "lm-qwen.service"
+      "lm-qwen.service",
+      "lm-qwen-tinygrad-agent.service",
+      "lm-qwen-tinygrad-model-proxy.service"
     ],
     "tailscaleServe": {
       "executable": "/usr/bin/tailscale",

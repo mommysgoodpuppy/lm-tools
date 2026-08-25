@@ -1,10 +1,13 @@
 import { killEverythingCommand, killEverythingUsage } from "./cleanup.ts";
+import { benchmarkCommand, benchmarkUsage } from "./benchmark.ts";
+import { campaignCommand, campaignUsage } from "./campaign.ts";
 import { downloadCommand, downloadUsage } from "./download.ts";
 import { deployCommand, deployUsage } from "./deployment.ts";
 import { environmentCommand, environmentUsage } from "./agent_environment.ts";
 import { llamaCommand, llamaUsage } from "./llama.ts";
 import { proxyCommand, proxyUsage } from "./proxy.ts";
 import { tinygradCommand, tinygradUsage } from "./tinygrad.ts";
+import { vendorCommand, vendorUsage } from "./vendor.ts";
 import { vscodeCommand, vscodeUsage } from "./vscode.ts";
 
 const VERSION = "0.1.0";
@@ -16,6 +19,8 @@ Usage:
   lm <command> [options]
 
 Commands:
+  benchmark Replay a captured request with comparable wall-time and VRAM measurements
+  campaign  Run a benchmark-gated autonomous optimization campaign
   download  Resumable parallel download for large model files
   deploy    Validate and run a declarative model deployment
   env       Manage a declarative isolated agent environment
@@ -23,6 +28,7 @@ Commands:
   llama     Launch llama-server with useful local defaults
   proxy     Adapt OpenAI-compatible traffic for clients such as VS Code
   tinygrad  Run the experimental vendored tinygrad LLM backend
+  vendor    Materialize and verify declarative pinned source builds
   vscode    Start the 128K Qwen llama/proxy stack for VS Code
 
 Run \"lm <command> --help\" for command-specific help.`;
@@ -32,6 +38,13 @@ export async function main(args: string[]): Promise<void> {
   const [command, ...commandArgs] = args;
 
   switch (command) {
+    case "benchmark":
+    case "bench":
+      await benchmarkCommand(commandArgs);
+      return;
+    case "campaign":
+      await campaignCommand(commandArgs);
+      return;
     case "download":
       await downloadCommand(commandArgs);
       return;
@@ -55,6 +68,9 @@ export async function main(args: string[]): Promise<void> {
     case "tinygrad":
       await tinygradCommand(commandArgs);
       return;
+    case "vendor":
+      await vendorCommand(commandArgs);
+      return;
     case "vscode":
       await vscodeCommand(commandArgs);
       return;
@@ -63,6 +79,10 @@ export async function main(args: string[]): Promise<void> {
       console.log(
         topic === "download"
           ? downloadUsage()
+          : topic === "benchmark" || topic === "bench"
+          ? benchmarkUsage()
+          : topic === "campaign"
+          ? campaignUsage()
           : topic === "deploy"
           ? deployUsage()
           : topic === "env" || topic === "environment"
@@ -75,6 +95,8 @@ export async function main(args: string[]): Promise<void> {
           ? proxyUsage()
           : topic === "tinygrad"
           ? tinygradUsage()
+          : topic === "vendor"
+          ? vendorUsage()
           : topic === "vscode"
           ? vscodeUsage()
           : usage(),

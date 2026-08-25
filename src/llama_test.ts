@@ -29,10 +29,26 @@ Deno.test("builds a configurable llama command", () => {
   assertEquals(options.cacheTypeK, "q4_0");
   assertEquals(options.cacheTypeV, "q4_0");
   assertEquals(options.mtpDraftTokens, 2);
+  assertEquals(options.dflashDraftTokens, 0);
   assertEquals(args.includes("--webui"), false);
   assertEquals(args.includes("draft-mtp"), true);
   assertEquals(args[args.indexOf("--spec-draft-n-max") + 1], "2");
   assertEquals(args.at(-1), "--verbose");
+});
+
+Deno.test("builds DFlash speculative decoding arguments", () => {
+  const options = parseLlamaArgs(["model.gguf"], {});
+  options.draftModel = "draft.gguf";
+  options.dflashDraftTokens = 4;
+  const args = buildLlamaArgs(options);
+  assertEquals(args.slice(args.indexOf("--model-draft"), args.indexOf("--model-draft") + 6), [
+    "--model-draft",
+    "draft.gguf",
+    "--spec-type",
+    "draft-dflash",
+    "--spec-draft-n-max",
+    "4",
+  ]);
 });
 
 Deno.test("can disable MTP explicitly", () => {

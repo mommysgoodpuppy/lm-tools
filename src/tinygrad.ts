@@ -1,11 +1,12 @@
 import { parsePositiveInteger, takeValue } from "./args.ts";
+import { checkVendorManifest, loadVendorManifest } from "./vendor.ts";
 
-const DEFAULT_QWEN =
-  "/home/ellie/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf";
+const DEFAULT_QWEN = "/home/ellie/.cache/lm-tools/models/Qwen3.8-27B-IQ4_XS.gguf";
 
 export interface TinygradOptions {
   python: string;
   device: string;
+  jit: number;
   recurrentChunk?: number;
   tinygradArgs: string[];
 }
@@ -19,11 +20,13 @@ Usage:
 
 lm-tools options:
   --device NAME          tinygrad device (default: AMD)
+  --jit N                tinygrad JIT mode (default: 1)
   --python PATH          Python interpreter (default: python3)
   --recurrent-chunk N    opt in to chunked Qwen 3.5+ recurrent prefill
   --                     pass all remaining arguments to tinygrad
 
-If MODEL is omitted, this machine's local Qwen3.8-27B Q4_K_M is used. All other
+If MODEL is omitted, the Qwen3.8-27B IQ4_XS selected for the pinned RDNA3
+kernel path is used. All other
 arguments are passed to tinygrad.llm; for example:
 
   lm tinygrad --max_context 4096 --benchmark 5
@@ -40,6 +43,7 @@ export function parseTinygradArgs(
   const tinygradArgs: string[] = [];
   let python = env.TINYGRAD_PYTHON ?? "python3";
   let device = env.TINYGRAD_DEVICE ?? "AMD";
+  let jit = parsePositiveInteger(env.TINYGRAD_JIT ?? "1", "TINYGRAD_JIT");
   let recurrentChunk: number | undefined;
   let hasModel = false;
   let passthrough = false;
@@ -59,6 +63,9 @@ export function parseTinygradArgs(
         break;
       case "--device":
         device = takeValue(args, i++, arg);
+        break;
+      case "--jit":
+        jit = parsePositiveInteger(takeValue(args, i++, arg), arg);
         break;
       case "--recurrent-chunk":
         recurrentChunk = parsePositiveInteger(takeValue(args, i++, arg), arg);
@@ -89,13 +96,14 @@ export function parseTinygradArgs(
   if (!hasModel) {
     tinygradArgs.unshift("--model", env.TINYGRAD_MODEL ?? DEFAULT_QWEN);
   }
-  return { python, device, recurrentChunk, tinygradArgs };
+  return { python, device, jit, recurrentChunk, tinygradArgs };
 }
 
 export function buildTinygradCommand(options: TinygradOptions, projectRoot: string) {
   const vendorRoot = `${projectRoot}/vendor/tinygrad`;
   const env: Record<string, string> = {
     DEV: options.device,
+    JIT: String(options.jit),
     PYTHONPATH: vendorRoot,
     PYTHONUNBUFFERED: "1",
   };
@@ -116,12 +124,13 @@ export async function tinygradCommand(args: string[]): Promise<void> {
   }
   const projectRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
   try {
-    await Deno.stat(`${projectRoot}/vendor/tinygrad/tinygrad`);
+    await checkVendorManifest(
+      await loadVendorManifest(`${projectRoot}/vendors/tinygrad-rdna3-qwen.json`),
+    );
   } catch (error) {
-    if (error instanceof Deno.errors.NotFound) {
-      throw new Error("tinygrad is not vendored; run `deno task tinygrad:vendor` first");
-    }
-    throw error;
+    throw new Error(
+      `${error instanceof Error ? error.message : error}; run deno task tinygrad:vendor`,
+    );
   }
   const spec = buildTinygradCommand(parseTinygradArgs(args), projectRoot);
   const command = new Deno.Command(spec.command, {

@@ -33,13 +33,49 @@ export interface AgentEnvironmentConfig {
     workspace: string;
     packages: string[];
   };
+  hostServices?: Array<{
+    source: string;
+    enabled: boolean;
+    running: boolean;
+    restartOnRefresh: boolean;
+  }>;
   worker?: {
-    transport: "exec-json" | "app-server";
+    transport: "exec-json" | "app-server" | "pi-rpc";
+    command?: string[];
     prompt: string;
     state: string;
     metricsDirectory: string;
+    liveNoticePath: string;
     dashboardPort: number;
     timeoutSeconds: number;
+    wrapUpSeconds?: number;
+    compaction?: {
+      mode: "model-directed";
+      maxPerSession: number;
+      reminderTokens: number;
+    };
+    phases?: Array<{
+      name: string;
+      prompt: string;
+      timeoutSeconds: number;
+      wrapUpSeconds: number;
+      finalizeTimeoutSeconds?: number;
+      requiredChangedFiles: string[];
+    }>;
+    phaseControl?: {
+      requestPath: string;
+      maxTransitions: number;
+      maxWallSeconds: number;
+      finalPhase: string;
+    };
+    turnSummary?: {
+      endpoint: string;
+      model: string;
+      reasoningEffort: "none" | "low" | "medium" | "high";
+      timeoutSeconds: number;
+      maxInputChars: number;
+      maxOutputTokens: number;
+    };
     cooldownSeconds: number;
     progressRepositories: string[];
     cleanupProcesses: string[];
@@ -77,7 +113,7 @@ Actions:
   --apply     Create/reconcile and start the declared Incus instance
   --provision Install/update the declared guest packages as container root
   --seed      Copy declared sources into the instance (never bind-mounts them)
-  --refresh   Refresh only declared control files; preserve guest workspace edits
+  --refresh   Refresh declared control files and host services; preserve guest workspace edits
   --model-proxy  Expose the host model only on the declared Incus bridge address
   --worker-once  Run one fresh, bounded agent turn and record campaign metrics
   --worker-loop  Continuously run fresh turns with the declared cooldown
@@ -224,6 +260,36 @@ export function buildProvisionCommand(environment: ResolvedAgentEnvironment): Co
   };
 }
 
+export function buildHostServiceCommands(
+  environment: ResolvedAgentEnvironment,
+  refresh = false,
+): CommandSpec[] {
+  const systemctl = "/usr/bin/systemctl";
+  const services = environment.config.hostServices ?? [];
+  if (services.length === 0) return [];
+  const commands: CommandSpec[] = services.map((service) => ({
+    executable: systemctl,
+    args: ["--user", "link", "--force", service.source],
+  }));
+  commands.push({ executable: systemctl, args: ["--user", "daemon-reload"] });
+  for (const service of services) {
+    const unit = basename(service.source);
+    commands.push({
+      executable: systemctl,
+      args: ["--user", service.enabled ? "enable" : "disable", unit],
+    });
+    commands.push({
+      executable: systemctl,
+      args: [
+        "--user",
+        service.running ? (refresh && service.restartOnRefresh ? "restart" : "start") : "stop",
+        unit,
+      ],
+    });
+  }
+  return commands;
+}
+
 function formatCommand(command: CommandSpec): string {
   return [command.executable, ...command.args].map(shellQuote).join(" ");
 }
@@ -254,6 +320,21 @@ async function succeeds(command: CommandSpec): Promise<boolean> {
   return output.success;
 }
 
+async function waitForGuestNetwork(environment: ResolvedAgentEnvironment): Promise<void> {
+  const { backend } = environment.config;
+  const deadline = performance.now() + 60_000;
+  while (performance.now() < deadline) {
+    if (
+      await succeeds({
+        executable: backend.executable,
+        args: ["exec", backend.instance, "--", "getent", "hosts", "mirrors.kernel.org"],
+      })
+    ) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Guest network did not become ready in ${backend.instance}`);
+}
+
 async function validateEnvironment(environment: ResolvedAgentEnvironment): Promise<void> {
   const { backend, guest, seeds } = environment.config;
   await assertFile(backend.executable, "Incus client", true);
@@ -266,6 +347,48 @@ async function validateEnvironment(environment: ResolvedAgentEnvironment): Promi
     }
     const source = await Deno.lstat(seed.source).catch(() => undefined);
     if (!source) throw new Error(`Seed source not found: ${seed.source}`);
+  }
+  const serviceNames = new Set<string>();
+  for (const service of environment.config.hostServices ?? []) {
+    const source = await Deno.lstat(service.source).catch(() => undefined);
+    if (!source?.isFile) throw new Error(`Host service unit not found: ${service.source}`);
+    const unit = basename(service.source);
+    if (!unit.endsWith(".service")) {
+      throw new Error(`Host service source must end in .service: ${service.source}`);
+    }
+    if (serviceNames.has(unit)) throw new Error(`Duplicate host service unit: ${unit}`);
+    serviceNames.add(unit);
+  }
+  const worker = environment.config.worker;
+  if (worker?.phases) {
+    if (worker.transport !== "app-server") {
+      throw new Error("Phased workers currently require transport=app-server");
+    }
+    const names = worker.phases.map((phase) => phase.name);
+    if (new Set(names).size !== names.length) throw new Error("Worker phase names must be unique");
+    for (const phase of worker.phases) {
+      if (!phase.prompt.startsWith("/")) {
+        throw new Error(`Worker phase prompt must be absolute: ${phase.prompt}`);
+      }
+      if (phase.wrapUpSeconds >= phase.timeoutSeconds) {
+        throw new Error(`Worker phase ${phase.name} wrap-up must precede its timeout`);
+      }
+      for (const path of phase.requiredChangedFiles) {
+        if (!path.startsWith("/")) {
+          throw new Error(`Worker phase required file must be absolute: ${path}`);
+        }
+      }
+    }
+    if (worker.phaseControl) {
+      if (!worker.phaseControl.requestPath.startsWith("/")) {
+        throw new Error("Worker phase-control requestPath must be absolute");
+      }
+      if (!names.includes(worker.phaseControl.finalPhase)) {
+        throw new Error(`Unknown worker final phase: ${worker.phaseControl.finalPhase}`);
+      }
+    }
+  } else if (worker?.phaseControl) {
+    throw new Error("Worker phaseControl requires phases");
   }
   modelEndpoint(environment);
 }
@@ -287,7 +410,14 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
     args: ["exec", backend.instance, "--", "true"],
   });
   if (!running) await run({ executable: incus, args: ["start", backend.instance] });
-  if (created) await provisionEnvironment(environment);
+  const packagesReady = await succeeds({
+    executable: incus,
+    args: ["exec", backend.instance, "--", "pacman", "-T", ...guest.packages],
+  });
+  if (!packagesReady) {
+    await waitForGuestNetwork(environment);
+    await provisionEnvironment(environment);
+  }
 
   const userExists = await succeeds({
     executable: incus,
@@ -334,8 +464,18 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
       guest.home,
     ],
   });
-  if (created && environment.config.seedOnCreate) await seedEnvironment(environment);
+  if (environment.config.seedOnCreate) {
+    await seedEnvironment(environment, false, !created);
+  }
+  await reconcileHostServices(environment);
   console.log(`Ready agent environment: ${environment.config.name} (${backend.instance})`);
+}
+
+async function reconcileHostServices(
+  environment: ResolvedAgentEnvironment,
+  refresh = false,
+): Promise<void> {
+  for (const command of buildHostServiceCommands(environment, refresh)) await run(command, false);
 }
 
 async function provisionEnvironment(environment: ResolvedAgentEnvironment): Promise<void> {
@@ -441,9 +581,16 @@ async function copySeed(
 async function seedEnvironment(
   environment: ResolvedAgentEnvironment,
   refreshOnly = false,
+  missingOnly = false,
 ): Promise<void> {
   for (const seed of environment.config.seeds) {
     if (refreshOnly && !seed.refresh) continue;
+    if (
+      missingOnly && await succeeds({
+        executable: environment.config.backend.executable,
+        args: ["exec", environment.config.backend.instance, "--", "test", "-e", seed.target],
+      })
+    ) continue;
     console.log(`Copying ${seed.source} -> ${seed.target}`);
     if (seed.exclude.length > 0) console.log(`  excluding: ${seed.exclude.join(", ")}`);
     await copySeed(environment, seed);
@@ -573,11 +720,16 @@ export async function environmentCommand(args: string[]): Promise<void> {
       console.log(formatCommand(seedCommands[index + 3]));
       console.log(formatCommand(seedCommands[index + 4]));
     }
+    for (const command of buildHostServiceCommands(environment)) {
+      console.log(formatCommand(command));
+    }
   } else if (action === "apply") await applyEnvironment(environment);
   else if (action === "provision") await provisionEnvironment(environment);
   else if (action === "seed") await seedEnvironment(environment);
-  else if (action === "refresh") await seedEnvironment(environment, true);
-  else if (action === "model-proxy") await serveModelProxy(environment);
+  else if (action === "refresh") {
+    await seedEnvironment(environment, true);
+    await reconcileHostServices(environment, true);
+  } else if (action === "model-proxy") await serveModelProxy(environment);
   else if (action === "worker-once") {
     const { run, ledger } = await runWorkerOnce(environment);
     console.log(

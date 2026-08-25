@@ -1,0 +1,65 @@
+{
+  "$schema": "../schemas/vendor.schema.json",
+  "version": 1,
+  "name": "pi-rpc",
+  "description": "Pinned Pi 0.84.2 source build and shrinkwrapped runtime for the alternative Qwen campaign harness",
+  "checkouts": [
+    {
+      "name": "pi",
+      "repository": "https://github.com/earendil-works/pi.git",
+      "revision": "914cf1472e715297caa30db4b9535d534a9eb718",
+      "path": "../vendor/pi"
+    }
+  ],
+  "steps": [
+    {
+      "name": "install pinned Pi workspace dependencies",
+      "run": ["npm", "ci", "--include=dev", "--ignore-scripts"],
+      "cwd": "${checkout.pi}"
+    },
+    {
+      "name": "build Pi RPC harness",
+      "run": ["npm", "run", "build:offline"],
+      "cwd": "${checkout.pi}"
+    },
+    {
+      "name": "create Pi runtime directory",
+      "run": ["mkdir", "-p", "${root}/vendor/pi-runtime"]
+    },
+    {
+      "name": "pack Pi coding agent",
+      "run": [
+        "npm",
+        "pack",
+        "--workspace",
+        "@earendil-works/pi-coding-agent",
+        "--pack-destination",
+        "${root}/vendor/pi-runtime"
+      ],
+      "cwd": "${checkout.pi}"
+    },
+    {
+      "name": "install shrinkwrapped Pi runtime",
+      "run": [
+        "npm",
+        "install",
+        "--prefix",
+        "${root}/vendor/pi-runtime",
+        "--omit=dev",
+        "${root}/vendor/pi-runtime/earendil-works-pi-coding-agent-0.84.2.tgz"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "pi",
+      "path": "${root}/vendor/pi-runtime/node_modules/.bin/pi",
+      "kind": "executable"
+    },
+    {
+      "name": "runtime",
+      "path": "${root}/vendor/pi-runtime",
+      "kind": "directory"
+    }
+  ]
+}

@@ -14,12 +14,13 @@ const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 Deno.test("loads the declarative Qwen deployment", async () => {
   const deployment = await loadDeployment(`${PROJECT_ROOT}/deployments/qwen-vscode.json`);
   assertEquals(deployment.config.backend.kind, "llama.cpp");
-  assertEquals(deployment.llama?.context, 131072);
+  assertEquals(deployment.llama?.context, 102400);
   assertEquals(deployment.llama?.mtpDraftTokens, 2);
+  assertEquals(deployment.llama?.dflashDraftTokens, 0);
   assertEquals(deployment.proxy?.listen.port, 1235);
   assertEquals(deployment.tailscaleServe?.httpsPort, 443);
   assertEquals(deployment.config.resources?.gpu.mode, "exclusive");
-  assertEquals(deployment.config.runtime.expectedVramMiB, 21000);
+  assertEquals(deployment.config.runtime.expectedVramMiB, 20000);
   assertEquals(deployment.config.model.capabilities.supportedReasoningLevels, [
     "none",
     "low",
@@ -42,9 +43,47 @@ Deno.test("loads the declarative Qwen deployment", async () => {
   assertEquals(buildTailscaleServeArgs(deployment, true), ["serve", "--https=443", "off"]);
 });
 
+Deno.test("loads the isolated Qwen campaign worker deployment", async () => {
+  const deployment = await loadDeployment(
+    `${PROJECT_ROOT}/deployments/qwen-campaign-agent.json`,
+  );
+  assertEquals(deployment.config.name, "qwen-campaign-agent");
+  assertEquals(deployment.config.runtime.contextWindow, 102400);
+  assertEquals(deployment.config.clients?.vscode.enabled, false);
+  assertEquals(deployment.config.exposure?.tailscaleServe.enabled, false);
+  assertEquals(
+    deployment.config.resources?.gpu.mode === "exclusive"
+      ? deployment.config.resources.gpu.vram.minimumRemainingMiB
+      : undefined,
+    1536,
+  );
+});
+
+Deno.test("loads the experimental DFlash 2 deployment", async () => {
+  const deployment = await loadDeployment(
+    `${PROJECT_ROOT}/deployments/qwen-vscode-dflash2.json`,
+  );
+  assertEquals(deployment.llama?.context, 102400);
+  assertEquals(deployment.llama?.mtpDraftTokens, 0);
+  assertEquals(deployment.llama?.dflashDraftTokens, 4);
+  assertEquals(
+    deployment.llama?.draftModel,
+    "/home/ellie/.cache/lm-tools/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf",
+  );
+  assertEquals(deployment.config.runtime.expectedVramMiB, 21100);
+  assertEquals(deployment.config.backend.vendor, {
+    manifest: "../vendors/llama-dflash2.json",
+    artifact: "llama-server",
+  });
+});
+
 Deno.test("loads the pinned DiffusionGemma Vulkan deployment", async () => {
   const deployment = await loadDeployment(`${PROJECT_ROOT}/deployments/diffusiongemma-lab.json`);
   assertEquals(deployment.config.backend.kind, "llama.cpp-diffusion");
+  assertEquals(deployment.config.backend.vendor, {
+    manifest: "../vendors/diffusiongemma.json",
+    artifact: "llama-diffusion-cli",
+  });
   assertEquals(deployment.config.model.source?.size, 16806810208);
   assertEquals(deployment.llama, undefined);
   assertEquals(deployment.config.services?.[0].kind, "diffusiongemma-lab");
@@ -87,7 +126,7 @@ Deno.test("generates portable API client JSON", async () => {
         apiKey: "local",
         models: [{
           id: "qwen3.8-27b",
-          name: "Qwen3.8 27B (local, 128K)",
+          name: "Qwen3.8 27B (Unsloth UD-Q4_K_XL, 100K)",
           reasoning: true,
           thinkingLevelMap: {
             off: "none",
@@ -99,7 +138,7 @@ Deno.test("generates portable API client JSON", async () => {
             max: null,
           },
           input: ["text"],
-          contextWindow: 131072,
+          contextWindow: 102400,
           maxTokens: 16384,
           cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         }],

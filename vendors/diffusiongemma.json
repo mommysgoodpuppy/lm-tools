@@ -1,0 +1,69 @@
+{
+  "$schema": "../schemas/vendor.schema.json",
+  "version": 1,
+  "name": "diffusiongemma",
+  "description": "Pinned DiffusionGemma frontend and llama.cpp PR build",
+  "checkouts": [
+    {
+      "name": "frontend",
+      "repository": "https://github.com/filliptm/diffusiongemma-lab.git",
+      "revision": "e707fb991f739087f347711f3571b0ec25aa11f8",
+      "path": "../vendor/diffusiongemma-lab",
+      "patches": ["../patches/diffusiongemma-lab-local.patch"]
+    },
+    {
+      "name": "llama",
+      "repository": "https://github.com/danielhanchen/llama.cpp.git",
+      "revision": "daca8075d871483545dd85d58ce11970b304b541",
+      "upstream": "https://github.com/ggml-org/llama.cpp/pull/24423",
+      "path": "../vendor/llama.cpp-diffusiongemma",
+      "patches": ["${checkout.frontend}/patches/diffusion-cli.patch"]
+    }
+  ],
+  "steps": [
+    {
+      "name": "install frontend dependencies",
+      "run": ["npm", "ci"],
+      "cwd": "${checkout.frontend}"
+    },
+    {
+      "name": "configure Vulkan build",
+      "run": [
+        "cmake",
+        "-S",
+        "${checkout.llama}",
+        "-B",
+        "${checkout.llama}/build-vulkan",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DGGML_VULKAN=ON",
+        "-DGGML_NATIVE=ON",
+        "-DLLAMA_CURL=OFF"
+      ]
+    },
+    {
+      "name": "build diffusion CLI",
+      "run": [
+        "cmake",
+        "--build",
+        "${checkout.llama}/build-vulkan",
+        "--target",
+        "llama-diffusion-cli",
+        "-j"
+      ]
+    }
+  ],
+  "artifacts": [
+    {
+      "name": "frontend",
+      "path": "${checkout.frontend}",
+      "kind": "directory"
+    },
+    {
+      "name": "llama-diffusion-cli",
+      "path": "${checkout.llama}/build-vulkan/bin/llama-diffusion-cli",
+      "kind": "executable"
+    }
+  ]
+}

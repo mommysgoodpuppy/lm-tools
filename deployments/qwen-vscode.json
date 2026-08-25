@@ -4,8 +4,13 @@
   "name": "qwen-vscode",
   "model": {
     "id": "qwen3.8-27b",
-    "name": "Qwen3.8 27B (local, 128K)",
-    "path": "/home/ellie/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf",
+    "name": "Qwen3.8 27B (Unsloth UD-Q4_K_XL, 100K)",
+    "path": "/home/ellie/.cache/lm-tools/models/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+    "source": {
+      "url": "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-UD-Q4_K_XL.gguf",
+      "size": 17559178144,
+      "sha256": "3f227079003add2511437e5b1e94812e363385225bf6a9b47b0054a72bc8b01e"
+    },
     "capabilities": {
       "tools": true,
       "vision": false,
@@ -15,9 +20,9 @@
     }
   },
   "runtime": {
-    "contextWindow": 131072,
+    "contextWindow": 102400,
     "maxOutputTokens": 16384,
-    "expectedVramMiB": 21000
+    "expectedVramMiB": 20000
   },
   "backend": {
     "kind": "llama.cpp",
