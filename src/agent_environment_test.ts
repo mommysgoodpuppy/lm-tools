@@ -2,10 +2,18 @@ import { assertEquals } from "jsr:@std/assert@1/equals";
 import { assertThrows } from "jsr:@std/assert@1/throws";
 import {
   buildSeedArchive,
+  isSupportedHostUnit,
   npmRegistryIntegrity,
   parseStrictDotenv,
   tailscaleServeNeedsApply,
 } from "./agent_environment.ts";
+
+Deno.test("host service units include socket activation", () => {
+  assertEquals(isSupportedHostUnit("worker.service"), true);
+  assertEquals(isSupportedHostUnit("worker.socket"), true);
+  assertEquals(isSupportedHostUnit("worker.target"), true);
+  assertEquals(isSupportedHostUnit("worker.timer"), false);
+});
 
 Deno.test("normalizes scalar and npm 12 one-element integrity responses", () => {
   const integrity = "sha512-pinned";

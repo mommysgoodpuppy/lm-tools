@@ -790,6 +790,10 @@ export function buildHostServiceCommands(
   return commands;
 }
 
+export function isSupportedHostUnit(unit: string): boolean {
+  return unit.endsWith(".service") || unit.endsWith(".socket") || unit.endsWith(".target");
+}
+
 function formatCommand(command: CommandSpec): string {
   return [command.executable, ...command.args].map(shellQuote).join(" ");
 }
@@ -949,8 +953,10 @@ async function validateEnvironment(
     const source = await Deno.lstat(service.source).catch(() => undefined);
     if (!source?.isFile) throw new Error(`Host service unit not found: ${service.source}`);
     const unit = basename(service.source);
-    if (!unit.endsWith(".service") && !unit.endsWith(".target")) {
-      throw new Error(`Host service source must end in .service or .target: ${service.source}`);
+    if (!isSupportedHostUnit(unit)) {
+      throw new Error(
+        `Host service source must end in .service, .socket, or .target: ${service.source}`,
+      );
     }
     if (serviceNames.has(unit)) throw new Error(`Duplicate host service unit: ${unit}`);
     serviceNames.add(unit);
