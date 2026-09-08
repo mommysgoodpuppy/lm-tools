@@ -25,7 +25,7 @@ Deno.test("parses a fenced structured turn research summary", () => {
   );
   assertEquals(parsed.runId, "run-7");
   assertEquals(parsed.status, "measurement-requested");
-  assertEquals(parsed.source, "qwen-generated");
+  assertEquals(parsed.source, "model-generated");
   assertEquals(parsed.evidence.length, 1);
 });
 

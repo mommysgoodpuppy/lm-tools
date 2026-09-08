@@ -24,30 +24,13 @@
     }
   },
   "emergencyStop": {
-    "userUnits": [
-      "lm-ps2-campaign.target",
-      "lm-ps2-console.service",
-      "lm-ps2-dashboard.service",
-      "lm-ps2-model-proxy.service",
-      "lm-ps2-worker.service",
-      "lm-qwen.service",
-      "lm-qwen-tinygrad-agent.service",
-      "lm-qwen-tinygrad-model-proxy.service"
-    ],
+    "userUnits": [],
     "tailscaleServe": {
       "executable": "/usr/bin/tailscale",
-      "httpsPorts": [443]
+      "httpsPorts": []
     }
   },
   "resources": {
-    "gpu": {
-      "mode": "exclusive",
-      "conflictingExecutables": ["/usr/bin/llama-server"],
-      "shutdownGraceSeconds": 5,
-      "vram": {
-        "devicePath": "/sys/class/drm/card1/device",
-        "minimumRemainingMiB": 2048
-      }
-    }
+    "gpu": { "mode": "shared" }
   }
 }

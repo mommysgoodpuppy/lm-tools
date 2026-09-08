@@ -115,13 +115,13 @@ async function recentEvents(path: string | undefined): Promise<EventTail> {
   }
 }
 
-async function serviceStates(): Promise<Record<string, string>> {
-  const units = [
-    "lm-qwen.service",
-    "lm-ps2-model-proxy.service",
-    "lm-ps2-worker.service",
-    "lm-ps2-console.service",
-  ];
+async function serviceStates(
+  environment: ResolvedAgentEnvironment,
+): Promise<Record<string, string>> {
+  const units = (environment.config.hostServices ?? []).map((service) =>
+    service.source.split("/").at(-1)!
+  );
+  if (units.length === 0) return {};
   const output = await new Deno.Command("/usr/bin/systemctl", {
     args: ["--user", "is-active", ...units],
     stdin: "null",
@@ -136,7 +136,9 @@ async function serviceStates(): Promise<Record<string, string>> {
 
 export async function serveWorkerDashboard(environment: ResolvedAgentEnvironment): Promise<never> {
   const worker = environment.config.worker;
-  if (!worker) throw new Error("This agent environment does not declare a worker");
+  if (!worker || worker.kind !== "turn-loop") {
+    throw new Error("The worker dashboard requires a turn-loop worker");
+  }
   const handler = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const headers = {
@@ -151,7 +153,7 @@ export async function serveWorkerDashboard(environment: ResolvedAgentEnvironment
       let objective: string | null = null;
       try {
         objective = await Deno.readTextFile(
-          join(new URL("..", import.meta.url).pathname, "environments/ps2-linux-worker/TURN.md"),
+          worker.prompt,
         );
       } catch {
         // The activity and ledger remain useful if the source checkout moves.
@@ -161,7 +163,7 @@ export async function serveWorkerDashboard(environment: ResolvedAgentEnvironment
         campaign,
         current,
         serverTime: new Date().toISOString(),
-        services: await serviceStates(),
+        services: await serviceStates(environment),
         objective,
         eventLog: {
           bytes: tail.bytes,

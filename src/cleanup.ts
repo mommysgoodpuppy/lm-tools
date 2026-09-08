@@ -1,7 +1,7 @@
 import { evictConflictingProcesses } from "./process_manager.ts";
 
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-const BASE_CONFIG = `${PROJECT_ROOT}/config/base.json`;
+const DEFAULT_BASE_CONFIG = `${PROJECT_ROOT}/config/base.json`;
 
 interface CleanupConfig {
   emergencyStop: {
@@ -32,7 +32,8 @@ export async function killEverythingCommand(args: string[]): Promise<void> {
   }
   if (args.length > 0) throw new Error(`Unknown kill-everything option: ${args[0]}`);
 
-  const config = JSON.parse(await Deno.readTextFile(BASE_CONFIG)) as CleanupConfig;
+  const baseConfigPath = Deno.env.get("LM_TOOLS_BASE_CONFIG") ?? DEFAULT_BASE_CONFIG;
+  const config = JSON.parse(await Deno.readTextFile(baseConfigPath)) as CleanupConfig;
   const units = config.emergencyStop.userUnits;
   if (units.length > 0) {
     const status = await new Deno.Command("/usr/bin/systemctl", {

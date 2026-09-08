@@ -1,129 +1,127 @@
 import { assertEquals } from "jsr:@std/assert@1/equals";
+import { assertThrows } from "jsr:@std/assert@1/throws";
 import {
-  buildApplyPlan,
-  buildHostServiceCommands,
-  buildProvisionCommand,
-  buildSeedCommands,
-  loadAgentEnvironment,
+  buildSeedArchive,
+  npmRegistryIntegrity,
+  parseStrictDotenv,
+  tailscaleServeNeedsApply,
 } from "./agent_environment.ts";
 
-const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
-
-Deno.test("loads the PS2 Linux Incus environment", async () => {
-  const environment = await loadAgentEnvironment(`${PROJECT_ROOT}/environments/ps2-linux.json`);
-  assertEquals(environment.config.backend.kind, "incus");
-  assertEquals(environment.config.backend.instance, "lm-ps2-linux");
-  assertEquals(environment.config.backend.network.name, "incusbr-1000");
-  assertEquals(environment.model.config.model.id, "qwen3.8-27b");
-  assertEquals(environment.config.guest.packages.includes("xorg-server-xvfb"), true);
-  assertEquals(environment.config.worker?.transport, "app-server");
+Deno.test("normalizes scalar and npm 12 one-element integrity responses", () => {
+  const integrity = "sha512-pinned";
+  assertEquals(npmRegistryIntegrity(integrity), integrity);
+  assertEquals(npmRegistryIntegrity([integrity]), integrity);
+  assertEquals(npmRegistryIntegrity([integrity, integrity]), undefined);
 });
 
-Deno.test("loads the no-GPU Qwen tinygrad campaign environment", async () => {
-  const environment = await loadAgentEnvironment(`${PROJECT_ROOT}/environments/qwen-tinygrad.json`);
-  assertEquals(environment.config.backend.instance, "lm-qwen-tinygrad");
-  assertEquals(environment.config.guest.workspace, "/home/ellie/git/tinygrad");
-  assertEquals(environment.config.worker?.transport, "app-server");
-  assertEquals(environment.config.worker?.wrapUpSeconds, 43200);
-  assertEquals(environment.config.worker?.compaction, undefined);
-  assertEquals(environment.config.worker?.phases?.map((phase) => phase.name), [
-    "discovery",
-    "implementation",
-    "verification",
-    "handoff",
-  ]);
-  assertEquals(environment.config.worker?.phaseControl, {
-    requestPath: "/home/ellie/campaign/qwen-tinygrad/PHASE_REQUEST.json",
-    maxTransitions: 64,
-    maxWallSeconds: 43200,
-    finalPhase: "handoff",
-  });
-  assertEquals(environment.config.worker?.turnSummary, {
-    endpoint: "http://127.0.0.1:1235/v1/chat/completions",
-    model: "qwen3.8-27b",
-    reasoningEffort: "low",
-    timeoutSeconds: 180,
-    maxInputChars: 48000,
-    maxOutputTokens: 1400,
-  });
-  assertEquals(environment.config.backend.modelAccess.port, 1245);
-  assertEquals(environment.config.hostServices?.length, 5);
-  const hostServices = buildHostServiceCommands(environment);
-  assertEquals(hostServices.some((command) => command.args.includes("daemon-reload")), true);
+Deno.test("strict dotenv parsing rejects shell syntax and undeclared keys", () => {
   assertEquals(
-    hostServices.some((command) => command.args.includes("lm-qwen-tinygrad-console.service")),
-    true,
+    parseStrictDotenv("# local only\nSERVICE_TOKEN=abc\nOWNER_ID='def'\n", [
+      "SERVICE_TOKEN",
+      "OWNER_ID",
+    ]),
+    { SERVICE_TOKEN: "abc", OWNER_ID: "def" },
   );
-  const refreshServices = buildHostServiceCommands(environment, true);
+  assertThrows(() => parseStrictDotenv("TOKEN=$(id)\n", ["TOKEN"]));
+  assertThrows(() => parseStrictDotenv("TOKEN=one\nTOKEN=two\n", ["TOKEN"]));
+  assertThrows(() => parseStrictDotenv("TOKEN=one\nEXTRA=two\n", ["TOKEN"]));
+});
+
+Deno.test("Git-aware seed selection honors ignore rules and hard-denies dotenv", async () => {
+  const parent = await Deno.makeTempDir({ prefix: "lm-tools-seed-" });
+  const source = `${parent}/checkout`;
+  await Deno.mkdir(source);
+  const git = async (args: string[]) => {
+    const output = await new Deno.Command("/usr/bin/git", {
+      args: ["-C", source, ...args],
+      stdout: "null",
+      stderr: "piped",
+    }).output();
+    if (!output.success) throw new Error(new TextDecoder().decode(output.stderr));
+  };
+  try {
+    await git(["init", "--quiet"]);
+    await Deno.writeTextFile(`${source}/.gitignore`, "ignored.txt\n.env\n");
+    await Deno.writeTextFile(`${source}/tracked.txt`, "before\n");
+    await Deno.writeTextFile(`${source}/.env`, "SECRET=tracked-but-denied\n");
+    await git(["add", ".gitignore", "tracked.txt"]);
+    await git(["add", "--force", ".env"]);
+    await Deno.writeTextFile(`${source}/tracked.txt`, "dirty\n");
+    await Deno.writeTextFile(`${source}/untracked.txt`, "new\n");
+    await Deno.writeTextFile(`${source}/ignored.txt`, "ignored\n");
+    const plan = buildSeedArchive({
+      source,
+      target: `/guest/${source.split("/").at(-1)}`,
+      exclude: [],
+      policy: "create",
+    });
+    assertEquals(plan.mode, "git");
+    const selected = new TextDecoder().decode(plan.stdin).split("\0").filter(Boolean);
+    assertEquals(selected.includes("checkout/tracked.txt"), true);
+    assertEquals(selected.includes("checkout/untracked.txt"), true);
+    assertEquals(selected.some((path) => path.endsWith("/.env")), false);
+    assertEquals(selected.includes("checkout/ignored.txt"), false);
+    assertEquals(plan.command.args.includes("--no-recursion"), true);
+    const archive = new Deno.Command(plan.command.executable, {
+      args: plan.command.args,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const writer = archive.stdin.getWriter();
+    await writer.write(plan.stdin);
+    await writer.close();
+    const archiveOutput = await archive.output();
+    assertEquals(archiveOutput.success, true);
+    const listing = new Deno.Command("/usr/bin/tar", {
+      args: ["-tf", "-"],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const listingWriter = listing.stdin.getWriter();
+    await listingWriter.write(archiveOutput.stdout);
+    await listingWriter.close();
+    const listingOutput = await listing.output();
+    assertEquals(listingOutput.success, true);
+    const archivedPaths = new TextDecoder().decode(listingOutput.stdout).split("\n");
+    assertEquals(archivedPaths.includes("checkout/tracked.txt"), true);
+    assertEquals(archivedPaths.includes("checkout/untracked.txt"), true);
+    assertEquals(archivedPaths.some((path) => path.endsWith("/.env")), false);
+  } finally {
+    await Deno.remove(parent, { recursive: true });
+  }
+});
+
+Deno.test("Tailscale exposure preserves its route and rejects another owner", () => {
+  const desired = "http://127.0.0.1:18789";
   assertEquals(
-    refreshServices.some((command) =>
-      command.args.includes("restart") &&
-      command.args.includes("lm-qwen-tinygrad-console.service")
-    ),
-    true,
-  );
-  assertEquals(
-    refreshServices.some((command) =>
-      command.args.includes("restart") && command.args.includes("lm-qwen-tinygrad-agent.service")
+    tailscaleServeNeedsApply(
+      {
+        TCP: { "8443": { HTTPS: true } },
+        Web: {
+          "host.example.ts.net:8443": { Handlers: { "/": { Proxy: desired } } },
+        },
+      },
+      "host.example.ts.net.",
+      8443,
+      desired,
     ),
     false,
   );
-  assertEquals(
-    buildApplyPlan(environment).some((command) => command.args.includes("gpu")),
-    false,
-  );
-});
-
-Deno.test("loads the Pi RPC alternative for the Qwen tinygrad worker", async () => {
-  const environment = await loadAgentEnvironment(
-    `${PROJECT_ROOT}/environments/qwen-tinygrad-pi.json`,
-  );
-  assertEquals(environment.config.backend.instance, "lm-qwen-tinygrad");
-  assertEquals(environment.config.worker?.transport, "pi-rpc");
-  assertEquals(environment.config.worker?.command?.includes("--no-session"), true);
-  assertEquals(environment.config.guest.packages.includes("nodejs-lts-krypton"), true);
-});
-
-Deno.test("guest provisioning is declared and noninteractive", async () => {
-  const environment = await loadAgentEnvironment(`${PROJECT_ROOT}/environments/ps2-linux.json`);
-  const provision = buildProvisionCommand(environment);
-  assertEquals(provision.executable, "/usr/bin/incus");
-  assertEquals(provision.args.includes("--noconfirm"), true);
-  assertEquals(provision.args.includes("--needed"), true);
-  assertEquals(provision.args.includes("codex"), false);
-});
-
-Deno.test("Incus plan is unprivileged and has no host device passthrough", async () => {
-  const environment = await loadAgentEnvironment(`${PROJECT_ROOT}/environments/ps2-linux.json`);
-  const plan = buildApplyPlan(environment).map((command) => command.args.join(" "));
-  assertEquals(plan.some((command) => command.includes("security.privileged=false")), true);
-  assertEquals(plan.some((command) => command.includes("security.nesting=false")), true);
-  assertEquals(environment.config.backend.modelAccess.host, "10.248.172.1");
-  assertEquals(plan.some((command) => command.includes(" proxy ")), false);
-  assertEquals(plan.some((command) => command.includes(" type=disk ")), false);
-});
-
-Deno.test("seeds use filtered tar streams rather than host disk devices", async () => {
-  const environment = await loadAgentEnvironment(`${PROJECT_ROOT}/environments/ps2-linux.json`);
-  const commands = buildSeedCommands(environment);
-  const archives = commands.filter((command) => command.executable === "/usr/bin/tar");
-  assertEquals(archives.length, environment.config.seeds.length);
-  assertEquals(
-    archives.some((command) => command.args.includes("--exclude=ps2linuxPCSX2/test/boot11.log")),
-    true,
-  );
-  assertEquals(commands.some((command) => command.args.includes("disk")), false);
-  assertEquals(environment.config.seeds.filter((seed) => seed.refresh).length >= 3, true);
-  assertEquals(
-    commands.some((command) =>
-      command.args.includes("chown") && command.args.includes("1000:1000")
-    ),
-    true,
-  );
-  assertEquals(
-    environment.config.seeds.some((seed) =>
-      seed.source.endsWith("ps2-linux-worker/STATE.md") && !seed.refresh
-    ),
-    true,
+  assertThrows(() =>
+    tailscaleServeNeedsApply(
+      {
+        TCP: { "8443": { HTTPS: true } },
+        Web: {
+          "host.example.ts.net:8443": {
+            Handlers: { "/": { Proxy: "http://127.0.0.1:9999" } },
+          },
+        },
+      },
+      "host.example.ts.net",
+      8443,
+      desired,
+    )
   );
 });

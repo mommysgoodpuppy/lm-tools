@@ -56,3 +56,16 @@ Deno.test("can disable MTP explicitly", () => {
   assertEquals(options.mtpDraftTokens, 0);
   assertEquals(buildLlamaArgs(options).includes("--spec-type"), false);
 });
+
+Deno.test("can keep a configured vision projector on CPU", () => {
+  const options = parseLlamaArgs(
+    ["model.gguf", "--mmproj", "projector.gguf", "--no-mmproj-offload"],
+    {},
+  );
+  assertEquals(options.mmproj, "projector.gguf");
+  assertEquals(options.mmprojOffload, false);
+  assertEquals(
+    buildLlamaArgs(options).slice(-3),
+    ["--mmproj", "projector.gguf", "--no-mmproj-offload"],
+  );
+});

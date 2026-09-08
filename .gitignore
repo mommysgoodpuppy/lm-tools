@@ -5,16 +5,5 @@
 results/
 __pycache__/
 *.pyc
-/vendor/tinygrad/
-/vendor/tinygrad-rdna3-backend/
-/vendor/diffusiongemma-lab/
-/vendor/llama.cpp-diffusiongemma/
-/vendor/llama.cpp-dflash2/
-/vendor/pi/
-/vendor/pi-runtime/
 /logs/
 /api-jsons/
-
-# Local-only host networking and campaign orchestration
-scripts/configure_ps2_agent_ufw.sh
-scripts/ps2_campaign.sh

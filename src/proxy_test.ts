@@ -1,5 +1,56 @@
+type JsonObject = Record<string, unknown>;
 import { assertEquals } from "jsr:@std/assert@1/equals";
-import { adaptReasoningEvent, adaptReasoningStream, normalizeRequestBody } from "./proxy.ts";
+import {
+  adaptReasoningEvent,
+  adaptReasoningStream,
+  InferenceTracker,
+  normalizeRequestBody,
+  observeStream,
+  proxyTraceRequestEvents,
+  proxyTraceResponseEvents,
+  serveProxy,
+} from "./proxy.ts";
+
+Deno.test("passes Codex discovery and health GETs through without request bodies", async () => {
+  const seen: Array<{ method: string; path: string }> = [];
+  const upstreamAbort = new AbortController();
+  const upstream = Deno.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    signal: upstreamAbort.signal,
+    onListen() {},
+  }, (request) => {
+    const url = new URL(request.url);
+    seen.push({ method: request.method, path: url.pathname });
+    if (url.pathname === "/health") return Response.json({ status: "ok" });
+    return Response.json({ object: "list", data: [{ id: "qwen3.8-27b" }] });
+  });
+  const upstreamPort = (upstream.addr as Deno.NetAddr).port;
+  const proxyAbort = new AbortController();
+  const server = serveProxy({
+    listenHost: "127.0.0.1",
+    listenPort: 0,
+    upstream: new URL(`http://127.0.0.1:${upstreamPort}`),
+  }, proxyAbort.signal);
+  const proxyPort = (server.addr as Deno.NetAddr).port;
+  try {
+    const health = await fetch(`http://127.0.0.1:${proxyPort}/health`);
+    assertEquals(await health.json(), { status: "ok" });
+    const models = await fetch(`http://127.0.0.1:${proxyPort}/v1/models`);
+    assertEquals(await models.json(), {
+      object: "list",
+      data: [{ id: "qwen3.8-27b" }],
+    });
+    assertEquals(seen, [
+      { method: "GET", path: "/health" },
+      { method: "GET", path: "/v1/models" },
+    ]);
+  } finally {
+    proxyAbort.abort();
+    upstreamAbort.abort();
+    await Promise.all([server.finished, upstream.finished]);
+  }
+});
 
 Deno.test("normalizes empty function parameters", () => {
   const input = {
@@ -20,6 +71,98 @@ Deno.test("normalizes empty function parameters", () => {
         },
         { type: "function", name: "valid", parameters: { type: "object" } },
       ],
+    },
+  });
+});
+
+Deno.test("preserves Responses API image inputs", () => {
+  const input = {
+    model: "qwen3.8-27b",
+    input: [{
+      type: "message",
+      role: "user",
+      content: [
+        { type: "input_text", text: "Describe this image." },
+        { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" },
+      ],
+    }],
+  };
+  assertEquals(normalizeRequestBody(input), { body: input, fixes: 0, changes: [] });
+});
+
+Deno.test("lifts images out of llama.cpp-incompatible function outputs", () => {
+  const image = { type: "input_image", image_url: "data:image/png;base64,iVBORw0KGgo=" };
+  assertEquals(
+    normalizeRequestBody({
+      model: "qwen3.8-27b",
+      input: [{
+        type: "function_call_output",
+        call_id: "call_browser_screenshot",
+        output: [
+          { type: "input_text", text: "Screenshot captured." },
+          image,
+        ],
+      }],
+    }),
+    {
+      fixes: 1,
+      changes: ["normalized 1 array tool output(s), lifting 1 image(s)"],
+      body: {
+        model: "qwen3.8-27b",
+        input: [
+          {
+            type: "function_call_output",
+            call_id: "call_browser_screenshot",
+            output: "Screenshot captured.",
+          },
+          {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_text",
+                text: "Image output from tool call call_browser_screenshot.",
+              },
+              image,
+            ],
+          },
+        ],
+      },
+    },
+  );
+});
+
+Deno.test("anchors tool schema patterns for llama.cpp without narrowing substring matches", () => {
+  const input = {
+    tools: [{
+      type: "function",
+      name: "cron",
+      parameters: {
+        type: "object",
+        properties: {
+          declarationKey: { type: "string", pattern: "\\S" },
+          fixed: { type: "string", pattern: "^[a-z]+$" },
+          prefix: { type: "string", pattern: "^job-" },
+        },
+      },
+    }],
+  };
+  assertEquals(normalizeRequestBody(input), {
+    fixes: 2,
+    changes: ["anchored 2 tool schema pattern(s)"],
+    body: {
+      tools: [{
+        type: "function",
+        name: "cron",
+        parameters: {
+          type: "object",
+          properties: {
+            declarationKey: { type: "string", pattern: "^.*(?:[^ \\t\\r\\n]).*$" },
+            fixed: { type: "string", pattern: "^[a-z]+$" },
+            prefix: { type: "string", pattern: "^(?:^job-).*$" },
+          },
+        },
+      }],
     },
   });
 });
@@ -119,12 +262,17 @@ Deno.test("removes proxy-generated system reasoning from model input", () => {
       ],
     }),
     {
-      fixes: 2,
-      changes: ["removed 2 system reasoning trace artifact(s)"],
+      // The surviving user item is also given an explicit type: llama.cpp
+      // rejects untyped items outright.
+      fixes: 3,
+      changes: [
+        "removed 2 system reasoning trace artifact(s)",
+        "typed 1 untyped input item(s) as message",
+      ],
       body: {
         input: [
           { type: "reasoning", id: "rs_model", text: "Actual model reasoning" },
-          { role: "user", content: "Keep this" },
+          { type: "message", role: "user", content: "Keep this" },
         ],
       },
     },
@@ -250,4 +398,192 @@ Deno.test("observes completed response usage without changing the stream", async
   })).text();
   assertEquals(observed, [completed]);
   assertEquals(output.includes('"total_tokens":1280'), true);
+});
+
+Deno.test("normalizes Responses tool calls and results into proxy-native timeline events", () => {
+  assertEquals(
+    proxyTraceResponseEvents({
+      type: "response.output_item.done",
+      item: {
+        type: "function_call",
+        id: "fc_1",
+        call_id: "call_1",
+        name: "exec",
+        arguments: '{"command":"pwd"}',
+      },
+    }),
+    [{
+      method: "item/started",
+      item: {
+        id: "call_1",
+        type: "commandExecution",
+        command: "pwd",
+        aggregatedOutput: "",
+      },
+    }],
+  );
+  assertEquals(
+    proxyTraceRequestEvents({
+      input: [{
+        type: "function_call_output",
+        call_id: "call_1",
+        output: '{"details":{"exitCode":7},"content":"failed"}',
+      }],
+    }),
+    [{
+      method: "item/completed",
+      item: {
+        id: "call_1",
+        type: "commandExecution",
+        aggregatedOutput: '{"details":{"exitCode":7},"content":"failed"}',
+        exitCode: 7,
+      },
+    }],
+  );
+});
+
+Deno.test("normalizes live Responses assistant and reasoning deltas", () => {
+  assertEquals(
+    proxyTraceResponseEvents({
+      type: "response.output_text.delta",
+      item_id: "msg_1",
+      delta: "hello",
+    }),
+    [{ method: "item/agentMessage/delta", params: { itemId: "msg_1", delta: "hello" } }],
+  );
+  assertEquals(
+    proxyTraceResponseEvents({
+      type: "response.reasoning_text.delta",
+      item_id: "reasoning_1",
+      delta: "checking",
+    }),
+    [{
+      method: "item/reasoning/textDelta",
+      params: { itemId: "reasoning_1", delta: "checking" },
+    }],
+  );
+});
+
+Deno.test("inference snapshot recovers prompt total from llama's cumulative fraction", () => {
+  const tracker = new InferenceTracker(102_400);
+  // llama reports tokens processed so far plus the cumulative fraction; the
+  // total follows from those two without reading the racing slot counters.
+  const snapshot = tracker.snapshot({ taskId: 7, tokens: 24_000, progress: 0.25 });
+  assertEquals(snapshot.phase, "prompt");
+  assertEquals(snapshot.active, true);
+  assertEquals(snapshot.prompt.processed, 24_000);
+  assertEquals(snapshot.prompt.total, 96_000);
+  assertEquals(snapshot.prompt.percent, 0.25);
+});
+
+Deno.test("inference snapshot reports billed context usage, not slot state", () => {
+  const tracker = new InferenceTracker(102_400);
+  tracker.observeUsage(71_118);
+  const snapshot = tracker.snapshot();
+  assertEquals(snapshot.phase, "idle");
+  assertEquals(snapshot.context?.used, 71_118);
+  assertEquals(snapshot.context?.limit, 102_400);
+  assertEquals(snapshot.prompt.percent, 0);
+});
+
+Deno.test("inference snapshot always carries the fields the observer renders", () => {
+  const tracker = new InferenceTracker(102_400);
+  tracker.observeUsage(38_433, 30_000);
+  const snapshot = tracker.snapshot();
+  // The observer reads every one of these unconditionally.
+  assertEquals(typeof snapshot.prompt.processed, "number");
+  assertEquals(typeof snapshot.prompt.total, "number");
+  assertEquals(typeof snapshot.prompt.cached, "number");
+  assertEquals(typeof snapshot.prompt.percent, "number");
+  assertEquals(snapshot.prompt.cached, 30_000);
+});
+
+Deno.test("inference snapshot never exceeds 100% when llama overshoots", () => {
+  const tracker = new InferenceTracker(102_400);
+  const snapshot = tracker.snapshot({ taskId: 1, tokens: 8_192, progress: 1.4 });
+  assertEquals(snapshot.prompt.percent, 1);
+});
+
+Deno.test("untyped Responses input items are typed as message for llama.cpp", () => {
+  const result = normalizeRequestBody({
+    model: "qwen3.8-27b",
+    input: [
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "hi" },
+      { type: "function_call", name: "exec", arguments: "{}" },
+      { type: "message", role: "user", content: "already typed" },
+    ],
+  });
+  const input = (result.body as Record<string, unknown>).input as Record<string, unknown>[];
+  assertEquals(result.fixes, 2);
+  assertEquals(input[0].type, "message");
+  assertEquals(input[1].type, "message");
+  assertEquals(input[2].type, "function_call");
+  assertEquals(input[3].type, "message");
+  assertEquals(input[0].content, "hello");
+  assertEquals(result.changes.some((c) => c.includes("typed 2 untyped input item")), true);
+});
+
+Deno.test("input items that are already typed are left untouched", () => {
+  const body = { model: "m", input: [{ type: "function_call_output", output: "ok" }] };
+  const result = normalizeRequestBody(body);
+  assertEquals(result.fixes, 0);
+  assertEquals(result.body, body);
+});
+
+Deno.test("auxiliary streams are observed without being altered", async () => {
+  const frames = [
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"Sum"}\n\n',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"mary"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) controller.enqueue(new TextEncoder().encode(frame));
+      controller.close();
+    },
+  });
+  const seen: JsonObject[] = [];
+  const out = observeStream(source, (event) => seen.push(event));
+  const text = await new Response(out).text();
+  // Byte-for-byte passthrough: compression/title calls must not be rewritten.
+  assertEquals(text, frames.join(""));
+  assertEquals(seen.length, 2);
+  assertEquals(seen[0].delta, "Sum");
+  assertEquals(seen[1].delta, "mary");
+});
+
+Deno.test("absent reasoning gets the deployment default, present reasoning does not", () => {
+  // Auxiliary calls (compression, titles) send no reasoning block at all.
+  const aux = normalizeRequestBody(
+    { model: "m", input: [{ type: "message", role: "user", content: "summarize" }] },
+    {},
+    "none",
+  );
+  const auxBody = aux.body as Record<string, unknown>;
+  assertEquals(auxBody.reasoning, { effort: "none" });
+  // "none" must not gain chat_template_kwargs: llama.cpp maps it to
+  // enable_thinking=false on its own and erases the kwarg.
+  assertEquals(auxBody.chat_template_kwargs, undefined);
+  assertEquals(aux.changes.some((c) => c.includes("defaulted absent reasoning")), true);
+
+  // A real agent turn already states its effort and must be left alone.
+  const turn = normalizeRequestBody(
+    {
+      model: "m",
+      input: [{ type: "message", role: "user", content: "hi" }],
+      reasoning: { effort: "low" },
+    },
+    {},
+    "none",
+  );
+  const turnBody = turn.body as Record<string, unknown>;
+  assertEquals((turnBody.reasoning as Record<string, unknown>).effort, "low");
+  assertEquals(turn.changes.some((c) => c.includes("defaulted absent reasoning")), false);
+});
+
+Deno.test("no default configured leaves absent reasoning absent", () => {
+  const body = { model: "m", input: [{ type: "message", role: "user", content: "x" }] };
+  const result = normalizeRequestBody(body, {});
+  assertEquals((result.body as Record<string, unknown>).reasoning, undefined);
 });

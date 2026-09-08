@@ -1,8 +1,6 @@
 import { parseNonNegativeInteger, parsePort, parsePositiveInteger, takeValue } from "./args.ts";
 import { terminateChild } from "./process_manager.ts";
 
-const DEFAULT_MODEL =
-  "/home/ellie/.lmstudio/models/lmstudio-community/Qwen3.8-27B-GGUF/Qwen3.8-27B-Q4_K_M.gguf";
 const DEFAULT_SERVER = "/usr/bin/llama-server";
 
 export interface LlamaOptions {
@@ -22,6 +20,7 @@ export interface LlamaOptions {
   dflashDraftTokens: number;
   draftModel?: string;
   mmproj?: string;
+  mmprojOffload?: boolean;
   webui: boolean;
   dryRun: boolean;
   serverArgs: string[];
@@ -31,7 +30,7 @@ export function llamaUsage(): string {
   return `Usage: lm llama [MODEL] [options] [-- llama-server args]
 
 Options:
-  --model PATH          GGUF model (or MODEL_PATH; defaults to the local Qwen model)
+  --model PATH          GGUF model (or MODEL_PATH; required)
   --server PATH         llama-server executable (or LLAMA_SERVER; default: ${DEFAULT_SERVER})
   --context TOKENS      Context size; accepts 8192, 64k, 1m (default: 64k)
   --host HOST           Listen address (default: 127.0.0.1)
@@ -45,6 +44,7 @@ Options:
   --parallel N          Concurrent sequences (default: 1)
   --mtp N               Native MTP draft tokens; 0 disables it (default: 0)
   --mmproj PATH         Enable vision with this projector
+  --no-mmproj-offload   Keep the vision projector on CPU to save VRAM
   --no-webui            Disable llama.cpp's web UI
   --dry-run             Print the resolved command without starting it
   --help                Show this help
@@ -69,7 +69,7 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
   const serverArgs = separator === -1 ? [] : args.slice(separator + 1);
   const commonKv = env.KV_CACHE_TYPE ?? "q8_0";
   const options: LlamaOptions = {
-    model: env.MODEL_PATH ?? DEFAULT_MODEL,
+    model: env.MODEL_PATH ?? "",
     server: env.LLAMA_SERVER ?? DEFAULT_SERVER,
     host: "127.0.0.1",
     port: parsePort(env.PORT ?? "8080", "PORT"),
@@ -99,6 +99,10 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
     }
     if (arg === "--no-webui") {
       options.webui = false;
+      continue;
+    }
+    if (arg === "--no-mmproj-offload") {
+      options.mmprojOffload = false;
       continue;
     }
     if (arg === "--dry-run") {
@@ -156,6 +160,7 @@ export function parseLlamaArgs(args: string[], env = Deno.env.toObject()): Llama
     }
   }
   if (positionalModel) options.model = positionalModel;
+  if (!options.model) throw new Error("A GGUF model is required via MODEL, --model, or MODEL_PATH");
   return options;
 }
 
@@ -206,6 +211,7 @@ export function buildLlamaArgs(options: LlamaOptions): string[] {
       ]
       : []),
     ...(options.mmproj ? ["--mmproj", options.mmproj] : []),
+    ...(options.mmproj && options.mmprojOffload === false ? ["--no-mmproj-offload"] : []),
     ...options.serverArgs,
   ];
 }

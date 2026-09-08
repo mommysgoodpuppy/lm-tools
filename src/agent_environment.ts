@@ -8,11 +8,89 @@ import { runWorkerLoop, runWorkerOnce } from "./agent_worker.ts";
 
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const ENVIRONMENT_SCHEMA = `${PROJECT_ROOT}/schemas/agent-environment.schema.json`;
-const DEFAULT_ENVIRONMENT = `${PROJECT_ROOT}/environments/ps2-linux.json`;
+
+export interface TurnLoopWorker {
+  kind: "turn-loop";
+  transport: "exec-json" | "app-server" | "pi-rpc";
+  command?: string[];
+  prompt: string;
+  state: string;
+  metricsDirectory: string;
+  liveNoticePath: string;
+  dashboardPort: number;
+  timeoutSeconds: number;
+  wrapUpSeconds?: number;
+  compaction?: {
+    mode: "model-directed";
+    maxPerSession: number;
+    reminderTokens: number;
+  };
+  phases?: Array<{
+    name: string;
+    prompt: string;
+    timeoutSeconds: number;
+    wrapUpSeconds: number;
+    finalizeTimeoutSeconds?: number;
+    requiredChangedFiles: string[];
+  }>;
+  phaseControl?: {
+    requestPath: string;
+    maxTransitions: number;
+    maxWallSeconds: number;
+    finalPhase: string;
+  };
+  turnSummary?: {
+    endpoint: string;
+    model: string;
+    reasoningEffort: "none" | "low" | "medium" | "high";
+    timeoutSeconds: number;
+    maxInputChars: number;
+    maxOutputTokens: number;
+  };
+  cooldownSeconds: number;
+  progressRepositories: string[];
+  cleanupProcesses: string[];
+}
+
+export interface ServiceWorker {
+  kind: "service";
+  command: string[];
+  environment?: Record<string, string>;
+  environmentInputs?: Array<{ source: string; key: string }>;
+  secretInputs?: Array<{ source: string; key: string; target: string }>;
+  setup?: Array<{
+    name: string;
+    check: string[];
+    checkJson?: Array<{ pointer: string; equals: string | number | boolean | null }>;
+    command: string[];
+    registryIntegrity?: { package: string; version: string; integrity: string };
+  }>;
+  unit: string;
+  restart: "no" | "on-failure" | "always";
+  restartSeconds: number;
+  restartPreventExitStatuses: number[];
+  ready: { command: string[]; timeoutSeconds: number };
+  restartOnRefresh: boolean;
+  transport?: never;
+  prompt?: never;
+  state?: never;
+  metricsDirectory?: never;
+  liveNoticePath?: never;
+  dashboardPort?: never;
+  timeoutSeconds?: never;
+  wrapUpSeconds?: never;
+  compaction?: never;
+  phases?: never;
+  phaseControl?: never;
+  turnSummary?: never;
+  cooldownSeconds?: never;
+  progressRepositories?: never;
+  cleanupProcesses?: never;
+}
 
 export interface AgentEnvironmentConfig {
   $schema?: string;
-  version: 1;
+  version: 2;
   name: string;
   modelDeployment: string;
   seedOnCreate: boolean;
@@ -21,8 +99,9 @@ export interface AgentEnvironmentConfig {
     executable: string;
     instance: string;
     image: string;
-    network: { name: string; device: string };
+    network: { name: string; device: string; address?: string };
     limits: { cpu: number; memory: string; processes: number };
+    lifecycle?: { createIfMissing: boolean; deleteProtection: boolean; autostart: boolean };
     modelAccess: { host: string; port: number };
   };
   guest: {
@@ -32,55 +111,39 @@ export interface AgentEnvironmentConfig {
     home: string;
     workspace: string;
     packages: string[];
+    administration?: { passwordlessSudo: boolean; linger: boolean };
+    npmPackages?: Array<{
+      name: string;
+      version: string;
+      integrity?: string;
+      source?: string;
+      allowLifecycleScripts: boolean;
+    }>;
   };
   hostServices?: Array<{
     source: string;
     enabled: boolean;
     running: boolean;
     restartOnRefresh: boolean;
+    environmentInputs?: Array<{ source: string; key: string }>;
   }>;
-  worker?: {
-    transport: "exec-json" | "app-server" | "pi-rpc";
-    command?: string[];
-    prompt: string;
-    state: string;
-    metricsDirectory: string;
-    liveNoticePath: string;
-    dashboardPort: number;
-    timeoutSeconds: number;
-    wrapUpSeconds?: number;
-    compaction?: {
-      mode: "model-directed";
-      maxPerSession: number;
-      reminderTokens: number;
-    };
-    phases?: Array<{
+  worker?: TurnLoopWorker | ServiceWorker;
+  exposure?: {
+    services: Array<{
       name: string;
-      prompt: string;
-      timeoutSeconds: number;
-      wrapUpSeconds: number;
-      finalizeTimeoutSeconds?: number;
-      requiredChangedFiles: string[];
+      guestPort?: number;
+      upstream?: string;
+      host?: { address: "127.0.0.1"; port: number };
+      tailscaleServe?: { enabled: true; executable: string; httpsPort: number };
     }>;
-    phaseControl?: {
-      requestPath: string;
-      maxTransitions: number;
-      maxWallSeconds: number;
-      finalPhase: string;
-    };
-    turnSummary?: {
-      endpoint: string;
-      model: string;
-      reasoningEffort: "none" | "low" | "medium" | "high";
-      timeoutSeconds: number;
-      maxInputChars: number;
-      maxOutputTokens: number;
-    };
-    cooldownSeconds: number;
-    progressRepositories: string[];
-    cleanupProcesses: string[];
   };
-  seeds: Array<{ source: string; target: string; exclude: string[]; refresh: boolean }>;
+  seeds: Array<{
+    source: string;
+    target: string;
+    exclude: string[];
+    policy: "create" | "refresh" | "manual";
+    mode?: string;
+  }>;
 }
 
 export interface ResolvedAgentEnvironment {
@@ -94,6 +157,12 @@ export interface CommandSpec {
   args: string[];
 }
 
+interface SeedArchivePlan {
+  command: CommandSpec;
+  stdin?: Uint8Array;
+  mode: "git" | "recursive";
+}
+
 function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
   return (errors ?? []).map((error) => {
     const location = error.instancePath || "/";
@@ -102,10 +171,9 @@ function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
 }
 
 export function environmentUsage(): string {
-  return `Usage: lm env [CONFIG] ACTION [-- COMMAND...]
+  return `Usage: lm env CONFIG ACTION [-- COMMAND...]
 
-Manage a disposable agent workspace. CONFIG defaults to:
-  ${DEFAULT_ENVIRONMENT}
+Manage a declarative agent workspace.
 
 Actions:
   --check     Validate schema, model reference, executables, and seed sources
@@ -113,12 +181,16 @@ Actions:
   --apply     Create/reconcile and start the declared Incus instance
   --provision Install/update the declared guest packages as container root
   --seed      Copy declared sources into the instance (never bind-mounts them)
+  --force-seed  Explicitly overwrite every declared seed, including create/manual state
   --refresh   Refresh declared control files and host services; preserve guest workspace edits
   --model-proxy  Expose the host model only on the declared Incus bridge address
   --worker-once  Run one fresh, bounded agent turn and record campaign metrics
   --worker-loop  Continuously run fresh turns with the declared cooldown
   --worker-metrics  Print the cumulative campaign ledger
   --worker-dashboard  Serve the live human-overview UI on localhost
+  --service-start  Reconcile and start a declared service worker and its exposure
+  --service-restart  Refresh secrets/configuration and restart a declared service worker
+  --service-stop  Stop a declared service worker and remove its Tailscale Serve route
   --status    Show the instance and its configured devices
   --exec      Run COMMAND as the declared guest user in its workspace
   --help      Show this help`;
@@ -157,6 +229,25 @@ function modelEndpoint(environment: ResolvedAgentEnvironment): { host: string; p
   return environment.model.proxy?.listen ?? config.backend.listen;
 }
 
+export function buildNetworkAddressCommand(
+  environment: ResolvedAgentEnvironment,
+  deviceExists: boolean,
+): CommandSpec | undefined {
+  const { backend } = environment.config;
+  if (!backend.network.address) return undefined;
+  return {
+    executable: backend.executable,
+    args: [
+      "config",
+      "device",
+      deviceExists ? "set" : "override",
+      backend.instance,
+      backend.network.device,
+      `ipv4.address=${backend.network.address}`,
+    ],
+  };
+}
+
 export function buildApplyPlan(environment: ResolvedAgentEnvironment): CommandSpec[] {
   const { backend } = environment.config;
   const incus = backend.executable;
@@ -171,18 +262,29 @@ export function buildApplyPlan(environment: ResolvedAgentEnvironment): CommandSp
         backend.instance,
         "security.privileged=false",
         "security.nesting=false",
+        ...(backend.lifecycle
+          ? [
+            `security.protection.delete=${backend.lifecycle.deleteProtection}`,
+            `boot.autostart=${backend.lifecycle.autostart}`,
+          ]
+          : []),
         `limits.cpu=${backend.limits.cpu}`,
         `limits.memory=${backend.limits.memory}`,
         `limits.processes=${backend.limits.processes}`,
       ],
     },
+    ...(backend.network.address ? [buildNetworkAddressCommand(environment, false)!] : []),
     { executable: incus, args: ["start", backend.instance] },
   ];
 }
 
 export function buildSeedCommands(environment: ResolvedAgentEnvironment): CommandSpec[] {
+  return buildSeedCommandGroups(environment).flat();
+}
+
+export function buildSeedCommandGroups(environment: ResolvedAgentEnvironment): CommandSpec[][] {
   const { backend, seeds } = environment.config;
-  return seeds.flatMap((seed): CommandSpec[] => {
+  return seeds.map((seed): CommandSpec[] => {
     const create = {
       executable: backend.executable,
       args: ["exec", backend.instance, "--", "mkdir", "-p", dirname(seed.target)],
@@ -210,20 +312,10 @@ export function buildSeedCommands(environment: ResolvedAgentEnvironment): Comman
         seed.target,
       ],
     };
-    const sourceName = basename(seed.source);
-    return [
+    const archive = buildSeedArchive(seed);
+    const commands = [
       create,
-      {
-        executable: "/usr/bin/tar",
-        args: [
-          "-C",
-          dirname(seed.source),
-          "-cpf",
-          "-",
-          ...seed.exclude.map((pattern) => `--exclude=${sourceName}/${pattern}`),
-          sourceName,
-        ],
-      },
+      archive.command,
       {
         executable: backend.executable,
         args: [
@@ -240,7 +332,224 @@ export function buildSeedCommands(environment: ResolvedAgentEnvironment): Comman
       ownParent,
       ownTarget,
     ];
+    if (seed.mode) {
+      commands.push({
+        executable: backend.executable,
+        args: ["exec", backend.instance, "--", "chmod", seed.mode, seed.target],
+      });
+    }
+    return commands;
   });
+}
+
+function commandText(command: Deno.CommandOutput): string {
+  return new TextDecoder().decode(command.stdout).trim();
+}
+
+function gitRootForSeed(source: string): string | undefined {
+  const stat = Deno.statSync(source);
+  const cwd = stat.isDirectory ? source : dirname(source);
+  const output = new Deno.Command("/usr/bin/git", {
+    args: ["-C", cwd, "rev-parse", "--show-toplevel"],
+    stdin: "null",
+    stdout: "piped",
+    stderr: "null",
+  }).outputSync();
+  return output.success ? commandText(output) : undefined;
+}
+
+function relativeTo(parent: string, child: string): string {
+  const prefix = `${parent.replace(/\/$/, "")}/`;
+  if (child === parent) return "";
+  if (!child.startsWith(prefix)) throw new Error(`${child} is not beneath ${parent}`);
+  return child.slice(prefix.length);
+}
+
+export function parseStrictDotenv(text: string, requiredKeys: string[]): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (const [index, rawLine] of text.split(/\r?\n/).entries()) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.startsWith("export ")) {
+      throw new Error(`dotenv line ${index + 1}: export syntax is not allowed`);
+    }
+    const match = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line);
+    if (!match) throw new Error(`dotenv line ${index + 1}: expected NAME=value`);
+    const [, key, rawValue] = match;
+    if (Object.hasOwn(values, key)) throw new Error(`dotenv line ${index + 1}: duplicate ${key}`);
+    if (!requiredKeys.includes(key)) throw new Error(`dotenv line ${index + 1}: unexpected ${key}`);
+    let value = rawValue;
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    } else if (/\s|\$\(|`|\\/.test(value)) {
+      throw new Error(`dotenv line ${index + 1}: quote whitespace and avoid shell syntax`);
+    }
+    if (!value) throw new Error(`dotenv line ${index + 1}: ${key} must not be empty`);
+    values[key] = value;
+  }
+  for (const key of requiredKeys) {
+    if (!Object.hasOwn(values, key)) throw new Error(`dotenv is missing required key ${key}`);
+  }
+  return values;
+}
+
+async function readSecretSource(
+  source: string,
+  requiredKeys: string[],
+): Promise<Record<string, string>> {
+  const stat = await Deno.stat(source).catch(() => undefined);
+  if (!stat?.isFile) throw new Error(`Secret input file not found: ${source}`);
+  if (stat.mode !== null && (stat.mode & 0o777) !== 0o600) {
+    throw new Error(`Secret input file must have mode 0600: ${source}`);
+  }
+  const ignored = await new Deno.Command("/usr/bin/git", {
+    args: ["-C", dirname(source), "check-ignore", "--quiet", "--", source],
+    stdin: "null",
+    stdout: "null",
+    stderr: "null",
+  }).output();
+  if (!ignored.success) throw new Error(`Secret input file is not ignored by Git: ${source}`);
+  return parseStrictDotenv(await Deno.readTextFile(source), requiredKeys);
+}
+
+function serviceInputGroups(
+  worker: ServiceWorker,
+  hostServices: NonNullable<AgentEnvironmentConfig["hostServices"]> = [],
+): Map<string, string[]> {
+  const groups = new Map<string, string[]>();
+  const hostInputs = hostServices.flatMap((service) => service.environmentInputs ?? []);
+  for (
+    const input of [
+      ...(worker.environmentInputs ?? []),
+      ...(worker.secretInputs ?? []),
+      ...hostInputs,
+    ]
+  ) {
+    const keys = groups.get(input.source) ?? [];
+    if (keys.includes(input.key)) {
+      throw new Error(`Duplicate service input key ${input.key} in ${input.source}`);
+    }
+    keys.push(input.key);
+    groups.set(input.source, keys);
+  }
+  return groups;
+}
+
+async function readServiceInputs(
+  worker: ServiceWorker,
+  hostServices: NonNullable<AgentEnvironmentConfig["hostServices"]> = [],
+): Promise<Map<string, Record<string, string>>> {
+  const values = new Map<string, Record<string, string>>();
+  for (const [source, keys] of serviceInputGroups(worker, hostServices)) {
+    values.set(source, await readSecretSource(source, keys));
+  }
+  return values;
+}
+
+function serviceEnvironmentInputs(
+  worker: ServiceWorker,
+  inputs: Map<string, Record<string, string>>,
+): Record<string, string> {
+  return Object.fromEntries((worker.environmentInputs ?? []).map((input) => [
+    input.key,
+    inputs.get(input.source)?.[input.key] ??
+      (() => {
+        throw new Error(`Missing service environment input ${input.key}`);
+      })(),
+  ]));
+}
+
+function seedPathExcluded(path: string, excludes: string[]): boolean {
+  if (basename(path) === ".env") return true;
+  return excludes.some((pattern) => path === pattern || path.startsWith(`${pattern}/`));
+}
+
+export function buildSeedArchive(
+  seed: AgentEnvironmentConfig["seeds"][number],
+): SeedArchivePlan {
+  const source = resolve(seed.source);
+  const sourceStat = Deno.statSync(source);
+  const sourceName = basename(source);
+  if (sourceName === ".env") {
+    throw new Error(`Seed source ${source} is a dotenv file; declare secretInputs instead`);
+  }
+  const root = gitRootForSeed(source);
+  // Git-aware filtering keeps ignored build output out of a seeded tree. A seed that
+  // names a single file is already explicit, so it is copied even when Git ignores it
+  // (built vendor artifacts live in ignored paths by design).
+  if (root && sourceStat.isDirectory) {
+    const withinRoot = relativeTo(root, source);
+    const output = new Deno.Command("/usr/bin/git", {
+      args: [
+        "-C",
+        root,
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        withinRoot || ".",
+      ],
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).outputSync();
+    if (!output.success) {
+      throw new Error(
+        `Could not enumerate Git-aware seed ${source}: ${new TextDecoder().decode(output.stderr)}`,
+      );
+    }
+    const selected = [
+      ...(sourceStat.isDirectory ? [sourceName] : []),
+      ...new TextDecoder().decode(output.stdout).split("\0").filter(Boolean).flatMap((rootPath) => {
+        const relative = withinRoot
+          ? rootPath === withinRoot
+            ? basename(rootPath)
+            : rootPath.startsWith(`${withinRoot}/`)
+            ? rootPath.slice(withinRoot.length + 1)
+            : undefined
+          : rootPath;
+        if (relative === undefined || seedPathExcluded(relative, seed.exclude)) return [];
+        return [sourceStat.isDirectory ? `${sourceName}/${relative}` : sourceName];
+      }),
+    ];
+    const stdin = new TextEncoder().encode(selected.length > 0 ? `${selected.join("\0")}\0` : "");
+    return {
+      mode: "git",
+      stdin,
+      command: {
+        executable: "/usr/bin/tar",
+        args: [
+          "-C",
+          dirname(source),
+          "--null",
+          "--no-recursion",
+          "--files-from=-",
+          "-cpf",
+          "-",
+        ],
+      },
+    };
+  }
+  return {
+    mode: "recursive",
+    command: {
+      executable: "/usr/bin/tar",
+      args: [
+        "-C",
+        dirname(source),
+        "-cpf",
+        "-",
+        "--exclude=.env",
+        ...seed.exclude.map((pattern) => `--exclude=${sourceName}/${pattern}`),
+        sourceName,
+      ],
+    },
+  };
 }
 
 export function buildProvisionCommand(environment: ResolvedAgentEnvironment): CommandSpec {
@@ -258,6 +567,181 @@ export function buildProvisionCommand(environment: ResolvedAgentEnvironment): Co
       ...guest.packages,
     ],
   };
+}
+
+export function buildGuestAdministrationCommands(
+  environment: ResolvedAgentEnvironment,
+): CommandSpec[] {
+  const { backend, guest } = environment.config;
+  const administration = guest.administration;
+  if (!administration) return [];
+  const commands: CommandSpec[] = [];
+  if (administration.passwordlessSudo) {
+    const sudoers = `/etc/sudoers.d/90-lm-tools-${guest.user}`;
+    commands.push(
+      {
+        executable: backend.executable,
+        args: ["exec", backend.instance, "--", "chmod", "0440", sudoers],
+      },
+      {
+        executable: backend.executable,
+        args: ["exec", backend.instance, "--", "visudo", "--check", "--file", sudoers],
+      },
+    );
+  }
+  if (administration.linger) {
+    commands.push({
+      executable: backend.executable,
+      args: ["exec", backend.instance, "--", "loginctl", "enable-linger", guest.user],
+    });
+  }
+  return commands;
+}
+
+export function buildGuestUserCommands(environment: ResolvedAgentEnvironment): CommandSpec[] {
+  const { backend, guest } = environment.config;
+  return [
+    {
+      executable: backend.executable,
+      args: ["exec", backend.instance, "--", "groupadd", "--gid", String(guest.gid), guest.user],
+    },
+    {
+      executable: backend.executable,
+      args: [
+        "exec",
+        backend.instance,
+        "--",
+        "useradd",
+        "--uid",
+        String(guest.uid),
+        "--gid",
+        String(guest.gid),
+        "--create-home",
+        "--home-dir",
+        guest.home,
+        "--shell",
+        "/bin/bash",
+        guest.user,
+      ],
+    },
+    {
+      executable: backend.executable,
+      args: [
+        "exec",
+        backend.instance,
+        "--",
+        "mkdir",
+        "-p",
+        guest.workspace,
+        `${guest.home}/.codex`,
+      ],
+    },
+    {
+      executable: backend.executable,
+      args: [
+        "exec",
+        backend.instance,
+        "--",
+        "chown",
+        "-R",
+        `${guest.uid}:${guest.gid}`,
+        guest.home,
+      ],
+    },
+  ];
+}
+
+export function buildNpmInstallCommand(
+  environment: ResolvedAgentEnvironment,
+  npmPackage: NonNullable<AgentEnvironmentConfig["guest"]["npmPackages"]>[number],
+): CommandSpec {
+  const packageReference = npmPackage.source
+    ? `/var/cache/lm-tools/npm/${basename(npmPackage.source)}`
+    : `${npmPackage.name}@${npmPackage.version}`;
+  return {
+    executable: environment.config.backend.executable,
+    args: [
+      "exec",
+      environment.config.backend.instance,
+      "--",
+      "npm",
+      "install",
+      "--global",
+      "--no-audit",
+      "--no-fund",
+      "--engine-strict",
+      ...(npmPackage.allowLifecycleScripts ? [] : ["--ignore-scripts"]),
+      ...(npmPackage.source ? ["--force"] : []),
+      packageReference,
+    ],
+  };
+}
+
+export function buildExposureCommands(environment: ResolvedAgentEnvironment): CommandSpec[] {
+  const { backend } = environment.config;
+  return (environment.config.exposure?.services ?? []).flatMap((service) => {
+    const commands: CommandSpec[] = service.host
+      ? [{
+        executable: backend.executable,
+        args: [
+          "config",
+          "device",
+          "add",
+          backend.instance,
+          service.name,
+          "proxy",
+          `listen=tcp:${service.host.address}:${service.host.port}`,
+          `connect=tcp:127.0.0.1:${service.guestPort!}`,
+          "bind=host",
+        ],
+      }]
+      : [];
+    if (service.tailscaleServe) {
+      commands.push({
+        executable: service.tailscaleServe.executable,
+        args: [
+          "serve",
+          "--bg",
+          `--https=${service.tailscaleServe.httpsPort}`,
+          exposureTarget(environment, service),
+        ],
+      });
+    }
+    return commands;
+  });
+}
+
+function exposureTarget(
+  environment: ResolvedAgentEnvironment,
+  service: NonNullable<AgentEnvironmentConfig["exposure"]>["services"][number],
+): string {
+  if (service.upstream) return service.upstream;
+  if (service.host) return `http://${service.host.address}:${service.host.port}`;
+  const address = environment.config.backend.network.address;
+  if (!address) throw new Error(`Direct exposure ${service.name} requires a guest network address`);
+  return `http://${address}:${service.guestPort!}`;
+}
+
+interface TailscaleServeStatus {
+  TCP?: Record<string, unknown>;
+  Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>;
+}
+
+export function tailscaleServeNeedsApply(
+  status: TailscaleServeStatus,
+  dnsName: string,
+  httpsPort: number,
+  desiredProxy: string,
+): boolean {
+  const port = String(httpsPort);
+  const webKey = `${dnsName.replace(/\.$/, "")}:${port}`;
+  const existingProxy = status.Web?.[webKey]?.Handlers?.["/"]?.Proxy;
+  if ((status.TCP?.[port] || status.Web?.[webKey]) && existingProxy !== desiredProxy) {
+    throw new Error(
+      `Tailscale HTTPS port ${port} is already owned by ${existingProxy ?? "another handler"}`,
+    );
+  }
+  return existingProxy !== desiredProxy;
 }
 
 export function buildHostServiceCommands(
@@ -278,6 +762,22 @@ export function buildHostServiceCommands(
       executable: systemctl,
       args: ["--user", service.enabled ? "enable" : "disable", unit],
     });
+  }
+  // `systemctl disable` also removes links created by `systemctl link`. Restore
+  // the discovery link for dormant units without adding a boot target wants link.
+  for (const service of services) {
+    if (!service.enabled) {
+      commands.push({
+        executable: systemctl,
+        args: ["--user", "link", "--force", service.source],
+      });
+    }
+  }
+  if (services.some((service) => !service.enabled)) {
+    commands.push({ executable: systemctl, args: ["--user", "daemon-reload"] });
+  }
+  for (const service of services) {
+    const unit = basename(service.source);
     commands.push({
       executable: systemctl,
       args: [
@@ -320,6 +820,72 @@ async function succeeds(command: CommandSpec): Promise<boolean> {
   return output.success;
 }
 
+async function outputText(command: CommandSpec): Promise<string> {
+  const output = await run(command, false);
+  return new TextDecoder().decode(output.stdout).trim();
+}
+
+async function runWithInput(command: CommandSpec, input: Uint8Array): Promise<void> {
+  const child = new Deno.Command(command.executable, {
+    args: command.args,
+    stdin: "piped",
+    stdout: "null",
+    stderr: "inherit",
+  }).spawn();
+  const writer = child.stdin.getWriter();
+  await writer.write(input);
+  await writer.close();
+  const status = await child.status;
+  if (!status.success) {
+    throw new Error(`Command failed (${status.code}): ${formatCommand(command)}`);
+  }
+}
+
+function guestUserArgs(environment: ResolvedAgentEnvironment, command: string[]): string[] {
+  const { backend, guest } = environment.config;
+  return [
+    "exec",
+    backend.instance,
+    "--user",
+    String(guest.uid),
+    "--group",
+    String(guest.gid),
+    "--cwd",
+    guest.workspace,
+    "--env",
+    `HOME=${guest.home}`,
+    "--env",
+    `XDG_RUNTIME_DIR=/run/user/${guest.uid}`,
+    "--env",
+    `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${guest.uid}/bus`,
+    "--",
+    ...command,
+  ];
+}
+
+function guestUserCommand(
+  environment: ResolvedAgentEnvironment,
+  command: string[],
+): CommandSpec {
+  return {
+    executable: environment.config.backend.executable,
+    args: guestUserArgs(environment, command),
+  };
+}
+
+async function writeGuestFile(
+  environment: ResolvedAgentEnvironment,
+  path: string,
+  content: string,
+  asGuest = false,
+): Promise<void> {
+  const command = asGuest ? guestUserCommand(environment, ["tee", path]) : {
+    executable: environment.config.backend.executable,
+    args: ["exec", environment.config.backend.instance, "--", "tee", path],
+  };
+  await runWithInput(command, new TextEncoder().encode(content));
+}
+
 async function waitForGuestNetwork(environment: ResolvedAgentEnvironment): Promise<void> {
   const { backend } = environment.config;
   const deadline = performance.now() + 60_000;
@@ -335,32 +901,62 @@ async function waitForGuestNetwork(environment: ResolvedAgentEnvironment): Promi
   throw new Error(`Guest network did not become ready in ${backend.instance}`);
 }
 
-async function validateEnvironment(environment: ResolvedAgentEnvironment): Promise<void> {
+async function validateEnvironment(
+  environment: ResolvedAgentEnvironment,
+  requireSecrets = true,
+): Promise<void> {
   const { backend, guest, seeds } = environment.config;
   await assertFile(backend.executable, "Incus client", true);
+  if (!/^[a-z_][a-z0-9_-]*$/.test(guest.user)) {
+    throw new Error(`Unsafe guest user name: ${guest.user}`);
+  }
   if (!guest.home.startsWith("/") || !guest.workspace.startsWith("/")) {
     throw new Error("Guest home and workspace must be absolute paths");
   }
+  if (resolve(guest.home) !== guest.home || resolve(guest.workspace) !== guest.workspace) {
+    throw new Error("Guest home and workspace must be normalized paths");
+  }
+  if (
+    backend.network.address &&
+    !/^(?:\d{1,3}\.){3}\d{1,3}$/.test(backend.network.address)
+  ) {
+    throw new Error(`Guest network address must be IPv4: ${backend.network.address}`);
+  }
   for (const seed of seeds) {
+    if (basename(seed.source) === ".env") {
+      throw new Error(`Secret files cannot be ordinary seeds: ${seed.source}`);
+    }
     if (!seed.target.startsWith("/")) {
       throw new Error(`Seed target must be absolute: ${seed.target}`);
     }
     const source = await Deno.lstat(seed.source).catch(() => undefined);
     if (!source) throw new Error(`Seed source not found: ${seed.source}`);
+    if (basename(seed.source) !== basename(seed.target)) {
+      throw new Error(
+        `Seed source and target basenames must match: ${seed.source} -> ${seed.target}`,
+      );
+    }
+  }
+  for (const npmPackage of guest.npmPackages ?? []) {
+    if (!npmPackage.source) continue;
+    const source = await Deno.lstat(npmPackage.source).catch(() => undefined);
+    if (!source?.isFile) {
+      throw new Error(`Local npm package artifact not found: ${npmPackage.source}`);
+    }
   }
   const serviceNames = new Set<string>();
   for (const service of environment.config.hostServices ?? []) {
     const source = await Deno.lstat(service.source).catch(() => undefined);
     if (!source?.isFile) throw new Error(`Host service unit not found: ${service.source}`);
     const unit = basename(service.source);
-    if (!unit.endsWith(".service")) {
-      throw new Error(`Host service source must end in .service: ${service.source}`);
+    if (!unit.endsWith(".service") && !unit.endsWith(".target")) {
+      throw new Error(`Host service source must end in .service or .target: ${service.source}`);
     }
     if (serviceNames.has(unit)) throw new Error(`Duplicate host service unit: ${unit}`);
     serviceNames.add(unit);
   }
   const worker = environment.config.worker;
-  if (worker?.phases) {
+  if (worker?.kind === "turn-loop" && worker.phases) {
     if (worker.transport !== "app-server") {
       throw new Error("Phased workers currently require transport=app-server");
     }
@@ -387,10 +983,107 @@ async function validateEnvironment(environment: ResolvedAgentEnvironment): Promi
         throw new Error(`Unknown worker final phase: ${worker.phaseControl.finalPhase}`);
       }
     }
-  } else if (worker?.phaseControl) {
+  } else if (worker?.kind === "turn-loop" && worker.phaseControl) {
     throw new Error("Worker phaseControl requires phases");
   }
+  if (worker?.kind === "service") {
+    for (const command of [worker.command, worker.ready.command]) {
+      if (!command[0].startsWith("/")) {
+        throw new Error(`Service command executable must be absolute: ${command[0]}`);
+      }
+    }
+    const environmentInputKeys = new Set<string>();
+    for (const input of worker.environmentInputs ?? []) {
+      if (
+        environmentInputKeys.has(input.key) || Object.hasOwn(worker.environment ?? {}, input.key)
+      ) {
+        throw new Error(`Duplicate service environment key: ${input.key}`);
+      }
+      environmentInputKeys.add(input.key);
+    }
+    const secretTargets = new Set<string>();
+    for (const input of worker.secretInputs ?? []) {
+      if (!input.target.startsWith("/")) {
+        throw new Error(`Secret input target must be absolute: ${input.target}`);
+      }
+      if (resolve(input.target) !== input.target) {
+        throw new Error(`Secret input target must be normalized: ${input.target}`);
+      }
+      if (!input.target.startsWith(`${guest.home}/`)) {
+        throw new Error(`Secret input target must be beneath guest home: ${input.target}`);
+      }
+      if (input.target === guest.workspace || input.target.startsWith(`${guest.workspace}/`)) {
+        throw new Error(
+          `Secret input target must stay outside the agent workspace: ${input.target}`,
+        );
+      }
+      if (secretTargets.has(input.target)) {
+        throw new Error(`Duplicate secret input target: ${input.target}`);
+      }
+      secretTargets.add(input.target);
+    }
+    if (requireSecrets) {
+      await readServiceInputs(worker, environment.config.hostServices);
+    }
+    const setupNames = new Set<string>();
+    for (const step of worker.setup ?? []) {
+      if (setupNames.has(step.name)) throw new Error(`Duplicate service setup step: ${step.name}`);
+      setupNames.add(step.name);
+      for (const command of [step.check, step.command]) {
+        if (!command[0].startsWith("/")) {
+          throw new Error(`Service setup executable must be absolute: ${command[0]}`);
+        }
+      }
+    }
+  }
+  const exposureNames = new Set<string>();
+  const hostPorts = new Set<number>();
+  const tailscalePorts = new Set<number>();
+  for (const service of environment.config.exposure?.services ?? []) {
+    if (exposureNames.has(service.name)) {
+      throw new Error(`Duplicate exposure name: ${service.name}`);
+    }
+    exposureNames.add(service.name);
+    if ((service.guestPort === undefined) === (service.upstream === undefined)) {
+      throw new Error(`Exposure ${service.name} requires exactly one of guestPort or upstream`);
+    }
+    if (service.host) {
+      if (service.upstream) {
+        throw new Error(`Exposure ${service.name} cannot combine host proxy and upstream`);
+      }
+      if (hostPorts.has(service.host.port)) {
+        throw new Error(`Duplicate exposure host port: ${service.host.port}`);
+      }
+      hostPorts.add(service.host.port);
+    } else if (service.upstream) {
+      if (!service.tailscaleServe) {
+        throw new Error(`Direct upstream exposure ${service.name} requires Tailscale Serve`);
+      }
+    } else if (!backend.network.address || !service.tailscaleServe) {
+      throw new Error(
+        `Exposure ${service.name} without a host proxy requires a static guest address and Tailscale Serve`,
+      );
+    }
+    if (service.tailscaleServe) {
+      await assertFile(service.tailscaleServe.executable, "Tailscale executable", true);
+      if (tailscalePorts.has(service.tailscaleServe.httpsPort)) {
+        throw new Error(`Duplicate Tailscale HTTPS port: ${service.tailscaleServe.httpsPort}`);
+      }
+      tailscalePorts.add(service.tailscaleServe.httpsPort);
+    }
+  }
   modelEndpoint(environment);
+}
+
+export function assertInstanceMayBeCreated(
+  environment: ResolvedAgentEnvironment,
+  exists: boolean,
+): void {
+  if (!exists && environment.config.backend.lifecycle?.createIfMissing === false) {
+    throw new Error(
+      `Persistent Incus instance ${environment.config.backend.instance} is missing; refusing to create a blank replacement`,
+    );
+  }
 }
 
 async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<void> {
@@ -398,12 +1091,22 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
   const incus = backend.executable;
   await run({ executable: incus, args: ["network", "show", backend.network.name] }, false);
   const exists = await succeeds({ executable: incus, args: ["config", "show", backend.instance] });
+  assertInstanceMayBeCreated(environment, exists);
   const created = !exists;
   if (!exists) {
     console.log(`Creating Incus instance ${backend.instance} from ${backend.image}`);
     await run({ executable: incus, args: ["init", backend.image, backend.instance] });
   }
   await run(buildApplyPlan(environment)[2]);
+  if (backend.network.address) {
+    // An instance-level override already exists on a reconciled instance; overriding
+    // it a second time is an error, so update the existing device instead.
+    const deviceExists = await succeeds({
+      executable: incus,
+      args: ["config", "device", "get", backend.instance, backend.network.device, "ipv4.address"],
+    });
+    await run(buildNetworkAddressCommand(environment, deviceExists)!);
+  }
 
   const running = await succeeds({
     executable: incus,
@@ -419,35 +1122,7 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
     await provisionEnvironment(environment);
   }
 
-  const userExists = await succeeds({
-    executable: incus,
-    args: ["exec", backend.instance, "--", "getent", "passwd", String(guest.uid)],
-  });
-  if (!userExists) {
-    await run({
-      executable: incus,
-      args: ["exec", backend.instance, "--", "groupadd", "--gid", String(guest.gid), guest.user],
-    });
-    await run({
-      executable: incus,
-      args: [
-        "exec",
-        backend.instance,
-        "--",
-        "useradd",
-        "--uid",
-        String(guest.uid),
-        "--gid",
-        String(guest.gid),
-        "--create-home",
-        "--home-dir",
-        guest.home,
-        "--shell",
-        "/bin/bash",
-        guest.user,
-      ],
-    });
-  }
+  await ensureGuestUser(environment);
   await run({
     executable: incus,
     args: ["exec", backend.instance, "--", "mkdir", "-p", guest.workspace, `${guest.home}/.codex`],
@@ -464,11 +1139,444 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
       guest.home,
     ],
   });
+  await reconcileGuestAdministration(environment);
+  await provisionNpmPackages(environment);
   if (environment.config.seedOnCreate) {
     await seedEnvironment(environment, false, !created);
   }
   await reconcileHostServices(environment);
+  await reconcileServiceWorker(environment);
+  await reconcileExposure(environment);
   console.log(`Ready agent environment: ${environment.config.name} (${backend.instance})`);
+}
+
+async function ensureGuestUser(environment: ResolvedAgentEnvironment): Promise<void> {
+  const { backend, guest } = environment.config;
+  const incus = backend.executable;
+  const passwd = await outputText({
+    executable: incus,
+    args: ["exec", backend.instance, "--", "getent", "passwd", String(guest.uid)],
+  }).catch(() => "");
+  if (passwd) {
+    const [name, , uid, gid, , home] = passwd.split(":");
+    if (
+      name !== guest.user || uid !== String(guest.uid) || gid !== String(guest.gid) ||
+      home !== guest.home
+    ) {
+      throw new Error(`Guest uid ${guest.uid} already belongs to incompatible account: ${passwd}`);
+    }
+    return;
+  }
+  const namedUser = await succeeds({
+    executable: incus,
+    args: ["exec", backend.instance, "--", "getent", "passwd", guest.user],
+  });
+  if (namedUser) throw new Error(`Guest user ${guest.user} already exists with another uid`);
+  const group = await outputText({
+    executable: incus,
+    args: ["exec", backend.instance, "--", "getent", "group", String(guest.gid)],
+  }).catch(() => "");
+  if (group && group.split(":", 1)[0] !== guest.user) {
+    throw new Error(`Guest gid ${guest.gid} already belongs to incompatible group: ${group}`);
+  }
+  if (!group) {
+    await run({
+      executable: incus,
+      args: ["exec", backend.instance, "--", "groupadd", "--gid", String(guest.gid), guest.user],
+    });
+  }
+  await run({
+    executable: incus,
+    args: [
+      "exec",
+      backend.instance,
+      "--",
+      "useradd",
+      "--uid",
+      String(guest.uid),
+      "--gid",
+      String(guest.gid),
+      "--create-home",
+      "--home-dir",
+      guest.home,
+      "--shell",
+      "/bin/bash",
+      guest.user,
+    ],
+  });
+}
+
+async function reconcileGuestAdministration(
+  environment: ResolvedAgentEnvironment,
+): Promise<void> {
+  const { guest } = environment.config;
+  const administration = guest.administration;
+  if (!administration) return;
+  if (administration.passwordlessSudo) {
+    const sudoers = `/etc/sudoers.d/90-lm-tools-${guest.user}`;
+    await writeGuestFile(
+      environment,
+      sudoers,
+      `${guest.user} ALL=(ALL:ALL) NOPASSWD: ALL\n`,
+    );
+  }
+  for (const command of buildGuestAdministrationCommands(environment)) await run(command, false);
+}
+
+async function provisionNpmPackages(environment: ResolvedAgentEnvironment): Promise<void> {
+  for (const npmPackage of environment.config.guest.npmPackages ?? []) {
+    const reference = `${npmPackage.name}@${npmPackage.version}`;
+    if (npmPackage.integrity) {
+      await verifyRegistryIntegrity(environment, {
+        name: npmPackage.name,
+        version: npmPackage.version,
+        integrity: npmPackage.integrity,
+      });
+    }
+    const installedText = await outputText({
+      executable: environment.config.backend.executable,
+      args: [
+        "exec",
+        environment.config.backend.instance,
+        "--",
+        "npm",
+        "list",
+        "--global",
+        "--depth=0",
+        "--json",
+      ],
+    }).catch(() => "{}");
+    const installed = JSON.parse(installedText) as {
+      dependencies?: Record<string, { version?: string }>;
+    };
+    if (
+      !npmPackage.source &&
+      installed.dependencies?.[npmPackage.name]?.version === npmPackage.version
+    ) continue;
+    if (npmPackage.source) {
+      const targetDirectory = "/var/cache/lm-tools/npm";
+      await run({
+        executable: environment.config.backend.executable,
+        args: [
+          "exec",
+          environment.config.backend.instance,
+          "--",
+          "mkdir",
+          "-p",
+          targetDirectory,
+        ],
+      }, false);
+      await run({
+        executable: environment.config.backend.executable,
+        args: [
+          "file",
+          "push",
+          npmPackage.source,
+          `${environment.config.backend.instance}${targetDirectory}/${basename(npmPackage.source)}`,
+        ],
+      }, false);
+    }
+    console.log(`Installing pinned npm package ${reference}`);
+    await run(buildNpmInstallCommand(environment, npmPackage));
+    if (
+      !(await succeeds({
+        executable: environment.config.backend.executable,
+        args: [
+          "exec",
+          environment.config.backend.instance,
+          "--",
+          "npm",
+          "list",
+          "--global",
+          "--depth=0",
+          reference,
+        ],
+      }))
+    ) {
+      throw new Error(`Pinned npm package did not verify after installation: ${reference}`);
+    }
+  }
+}
+
+async function verifyRegistryIntegrity(
+  environment: ResolvedAgentEnvironment,
+  pin: { name?: string; package?: string; version: string; integrity: string },
+  asGuest = false,
+): Promise<void> {
+  const packageName = pin.name ?? pin.package!;
+  const reference = `${packageName}@${pin.version}`;
+  const argv = ["npm", "view", reference, "dist.integrity", "--json"];
+  const integrityText = await outputText(
+    asGuest ? guestUserCommand(environment, argv) : {
+      executable: environment.config.backend.executable,
+      args: ["exec", environment.config.backend.instance, "--", ...argv],
+    },
+  );
+  const response = JSON.parse(integrityText) as unknown;
+  const integrity = npmRegistryIntegrity(response);
+  if (integrity !== pin.integrity) {
+    throw new Error(
+      `npm integrity mismatch for ${reference}: expected ${pin.integrity}, got ${
+        JSON.stringify(response)
+      }`,
+    );
+  }
+}
+
+export function npmRegistryIntegrity(response: unknown): string | undefined {
+  if (typeof response === "string") return response;
+  if (Array.isArray(response) && response.length === 1 && typeof response[0] === "string") {
+    return response[0];
+  }
+  return undefined;
+}
+
+function jsonPointer(value: unknown, pointer: string): unknown {
+  return pointer.slice(1).split("/").reduce<unknown>((current, segment) => {
+    if (typeof current !== "object" || current === null) return undefined;
+    const key = segment.replaceAll("~1", "/").replaceAll("~0", "~");
+    return (current as Record<string, unknown>)[key];
+  }, value);
+}
+
+async function serviceSetupReady(
+  environment: ResolvedAgentEnvironment,
+  step: NonNullable<ServiceWorker["setup"]>[number],
+  serviceEnvironment: Record<string, string> = {},
+): Promise<boolean> {
+  const command = guestServiceCommand(environment, serviceEnvironment, step.check);
+  if (!step.checkJson) return await succeeds(command);
+  try {
+    const value = JSON.parse(await outputText(command));
+    return step.checkJson.every((expectation) =>
+      Object.is(jsonPointer(value, expectation.pointer), expectation.equals)
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function buildServiceUnit(
+  environment: ResolvedAgentEnvironment,
+  worker: ServiceWorker,
+  inputEnvironment: Record<string, string> = {},
+): string {
+  const systemdQuote = (value: string) => JSON.stringify(value.replaceAll("%", "%%"));
+  const environmentLines = Object.entries({ ...worker.environment, ...inputEnvironment }).map((
+    [key, value],
+  ) => `Environment=${systemdQuote(`${key}=${value}`)}`);
+  return [
+    "[Unit]",
+    `Description=lm-tools service worker for ${environment.config.name}`,
+    "After=network-online.target",
+    "Wants=network-online.target",
+    "",
+    "[Service]",
+    "Type=simple",
+    `WorkingDirectory=${environment.config.guest.workspace}`,
+    `ExecStart=${worker.command.map(systemdQuote).join(" ")}`,
+    ...environmentLines,
+    `Restart=${worker.restart}`,
+    `RestartSec=${worker.restartSeconds}`,
+    `RestartPreventExitStatus=${worker.restartPreventExitStatuses.join(" ")}`,
+    "KillMode=control-group",
+    "OOMPolicy=continue",
+    "TimeoutStartSec=120",
+    "TimeoutStopSec=30",
+    "",
+    "[Install]",
+    "WantedBy=default.target",
+    "",
+  ].join("\n");
+}
+
+function guestServiceCommand(
+  environment: ResolvedAgentEnvironment,
+  serviceEnvironment: Record<string, string>,
+  command: string[],
+): CommandSpec {
+  return guestUserCommand(environment, [
+    "/usr/bin/env",
+    ...Object.entries(serviceEnvironment).map(([key, value]) => `${key}=${value}`),
+    ...command,
+  ]);
+}
+
+async function importServiceSecrets(
+  environment: ResolvedAgentEnvironment,
+  worker: ServiceWorker,
+  sourceValues: Map<string, Record<string, string>>,
+): Promise<void> {
+  for (const input of worker.secretInputs ?? []) {
+    const value = sourceValues.get(input.source)?.[input.key];
+    if (value === undefined) throw new Error(`Missing protected service input ${input.key}`);
+    console.log(`Importing protected secret ${input.key}: present`);
+    const targetDirectory = dirname(input.target);
+    await run(guestUserCommand(environment, ["mkdir", "-p", targetDirectory]), false);
+    await run(guestUserCommand(environment, ["chmod", "0700", targetDirectory]), false);
+    const temporary = `${input.target}.lm-tools-${crypto.randomUUID()}`;
+    try {
+      await runWithInput(
+        guestUserCommand(environment, ["tee", temporary]),
+        new TextEncoder().encode(value),
+      );
+      await run(guestUserCommand(environment, ["chmod", "0600", temporary]), false);
+      await run(guestUserCommand(environment, ["mv", "--", temporary, input.target]), false);
+    } catch (error) {
+      await run(guestUserCommand(environment, ["rm", "-f", "--", temporary]), false).catch(() =>
+        undefined
+      );
+      throw error;
+    }
+  }
+}
+
+async function reconcileServiceWorker(
+  environment: ResolvedAgentEnvironment,
+  refresh = false,
+): Promise<void> {
+  const worker = environment.config.worker;
+  if (!worker || worker.kind !== "service") return;
+  const { guest } = environment.config;
+  await run(
+    guestUserCommand(environment, ["mkdir", "-p", `${guest.home}/.config/systemd/user`]),
+    false,
+  );
+  const inputValues = await readServiceInputs(worker, environment.config.hostServices);
+  const inputEnvironment = {
+    ...worker.environment,
+    ...serviceEnvironmentInputs(worker, inputValues),
+  };
+  await importServiceSecrets(environment, worker, inputValues);
+  for (const step of worker.setup ?? []) {
+    if (step.registryIntegrity) {
+      await verifyRegistryIntegrity(environment, step.registryIntegrity, true);
+    }
+    if (await serviceSetupReady(environment, step, inputEnvironment)) continue;
+    console.log(`Running service setup: ${step.name}`);
+    await run(guestServiceCommand(environment, inputEnvironment, step.command));
+    if (!(await serviceSetupReady(environment, step, inputEnvironment))) {
+      throw new Error(`Service setup check still fails after ${step.name}`);
+    }
+  }
+  const unitPath = `${guest.home}/.config/systemd/user/${worker.unit}`;
+  await writeGuestFile(
+    environment,
+    unitPath,
+    buildServiceUnit(environment, worker, inputEnvironment),
+    true,
+  );
+  await run(guestUserCommand(environment, ["systemctl", "--user", "daemon-reload"]), false);
+  await run(
+    guestUserCommand(environment, [
+      "systemctl",
+      "--user",
+      "enable",
+      "--now",
+      worker.unit,
+    ]),
+    false,
+  );
+  if (refresh && worker.restartOnRefresh) {
+    await run(
+      guestUserCommand(environment, ["systemctl", "--user", "restart", worker.unit]),
+      false,
+    );
+  }
+  const deadline = performance.now() + worker.ready.timeoutSeconds * 1000;
+  while (performance.now() < deadline) {
+    if (await succeeds(guestServiceCommand(environment, inputEnvironment, worker.ready.command))) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Service worker ${worker.unit} did not become ready`);
+}
+
+async function reconcileExposure(environment: ResolvedAgentEnvironment): Promise<void> {
+  const { backend } = environment.config;
+  for (const service of environment.config.exposure?.services ?? []) {
+    if (service.host) {
+      const desired = {
+        type: "proxy",
+        listen: `tcp:${service.host.address}:${service.host.port}`,
+        connect: `tcp:127.0.0.1:${service.guestPort!}`,
+        bind: "host",
+      };
+      const deviceExists = await succeeds({
+        executable: backend.executable,
+        args: ["config", "device", "get", backend.instance, service.name, "type"],
+      });
+      if (!deviceExists) {
+        await run(
+          buildExposureCommands(environment).find((command) =>
+            command.executable === backend.executable && command.args.includes(service.name)
+          )!,
+        );
+      } else {
+        for (const [key, value] of Object.entries(desired)) {
+          const actual = await outputText({
+            executable: backend.executable,
+            args: ["config", "device", "get", backend.instance, service.name, key],
+          });
+          if (actual !== value) {
+            throw new Error(
+              `Incus device ${service.name} ${key} is ${JSON.stringify(actual)}, expected ${
+                JSON.stringify(value)
+              }`,
+            );
+          }
+        }
+      }
+    }
+    const tailscale = service.tailscaleServe;
+    if (!tailscale) continue;
+    const statusText = await outputText({
+      executable: tailscale.executable,
+      args: ["serve", "status", "--json"],
+    });
+    const status = JSON.parse(statusText) as TailscaleServeStatus;
+    const tailscaleStatus = JSON.parse(
+      await outputText({
+        executable: tailscale.executable,
+        args: ["status", "--json"],
+      }),
+    ) as { Self?: { DNSName?: string } };
+    const dnsName = tailscaleStatus.Self?.DNSName?.replace(/\.$/, "");
+    if (!dnsName) throw new Error("Could not resolve this host's Tailscale DNS name");
+    const port = String(tailscale.httpsPort);
+    const webKey = `${dnsName}:${port}`;
+    const desiredProxy = exposureTarget(environment, service);
+    if (tailscaleServeNeedsApply(status, dnsName, tailscale.httpsPort, desiredProxy)) {
+      await run({
+        executable: tailscale.executable,
+        args: ["serve", "--bg", `--https=${port}`, desiredProxy],
+      });
+    }
+    console.log(`Tailscale Serve: https://${webKey}/ -> ${desiredProxy}`);
+  }
+}
+
+async function stopServiceWorker(environment: ResolvedAgentEnvironment): Promise<void> {
+  const worker = environment.config.worker;
+  if (!worker || worker.kind !== "service") {
+    throw new Error("This action requires a service worker");
+  }
+  await run(guestUserCommand(environment, ["systemctl", "--user", "stop", worker.unit]), false);
+  for (const service of environment.config.hostServices ?? []) {
+    const unit = basename(service.source);
+    if (unit.endsWith(".target")) {
+      await run({ executable: "/usr/bin/systemctl", args: ["--user", "stop", unit] }, false);
+    }
+  }
+  for (const service of environment.config.exposure?.services ?? []) {
+    const tailscale = service.tailscaleServe;
+    if (!tailscale) continue;
+    await run({
+      executable: tailscale.executable,
+      args: ["serve", `--https=${tailscale.httpsPort}`, "off"],
+    });
+  }
 }
 
 async function reconcileHostServices(
@@ -496,6 +1604,8 @@ async function serveModelProxy(environment: ResolvedAgentEnvironment): Promise<v
     String(access.port),
     "--upstream",
     `http://${modelBackend.listen.host}:${modelBackend.listen.port}`,
+    "--context-limit",
+    String(environment.model.config.runtime.contextWindow),
   ]);
 }
 
@@ -514,16 +1624,13 @@ async function copySeed(
       `Seed source and target basenames must match: ${seed.source} -> ${seed.target}`,
     );
   }
-  const archive = new Deno.Command("/usr/bin/tar", {
-    args: [
-      "-C",
-      dirname(seed.source),
-      "-cpf",
-      "-",
-      ...seed.exclude.map((pattern) => `--exclude=${sourceName}/${pattern}`),
-      sourceName,
-    ],
-    stdin: "null",
+  const archivePlan = buildSeedArchive(seed);
+  console.log(
+    `  selection: ${archivePlan.mode === "git" ? "git --exclude-standard" : "recursive"}`,
+  );
+  const archive = new Deno.Command(archivePlan.command.executable, {
+    args: archivePlan.command.args,
+    stdin: archivePlan.stdin ? "piped" : "null",
     stdout: "piped",
     stderr: "inherit",
   }).spawn();
@@ -542,10 +1649,18 @@ async function copySeed(
     stdout: "inherit",
     stderr: "inherit",
   }).spawn();
+  const input = archivePlan.stdin
+    ? (async () => {
+      const writer = archive.stdin.getWriter();
+      await writer.write(archivePlan.stdin!);
+      await writer.close();
+    })()
+    : Promise.resolve();
   const pipe = archive.stdout.pipeTo(extract.stdin);
   const [archiveStatus, extractStatus] = await Promise.all([
     archive.status,
     extract.status,
+    input,
     pipe,
   ]);
   if (!archiveStatus.success || !extractStatus.success) {
@@ -576,21 +1691,43 @@ async function copySeed(
       seed.target,
     ],
   });
+  if (seed.mode) {
+    await run({
+      executable: backend.executable,
+      args: ["exec", backend.instance, "--", "chmod", seed.mode, seed.target],
+    });
+  }
 }
 
 async function seedEnvironment(
   environment: ResolvedAgentEnvironment,
   refreshOnly = false,
   missingOnly = false,
+  force = false,
 ): Promise<void> {
   for (const seed of environment.config.seeds) {
-    if (refreshOnly && !seed.refresh) continue;
-    if (
-      missingOnly && await succeeds({
-        executable: environment.config.backend.executable,
-        args: ["exec", environment.config.backend.instance, "--", "test", "-e", seed.target],
-      })
-    ) continue;
+    if (!force && seed.policy === "manual") continue;
+    if (!force && refreshOnly && seed.policy !== "refresh") continue;
+    const targetExists = await succeeds({
+      executable: environment.config.backend.executable,
+      args: ["exec", environment.config.backend.instance, "--", "test", "-e", seed.target],
+    });
+    if (!force && (missingOnly || seed.policy === "create") && targetExists) {
+      if (seed.mode) {
+        await run({
+          executable: environment.config.backend.executable,
+          args: [
+            "exec",
+            environment.config.backend.instance,
+            "--",
+            "chmod",
+            seed.mode,
+            seed.target,
+          ],
+        });
+      }
+      continue;
+    }
     console.log(`Copying ${seed.source} -> ${seed.target}`);
     if (seed.exclude.length > 0) console.log(`  excluding: ${seed.exclude.join(", ")}`);
     await copySeed(environment, seed);
@@ -604,11 +1741,29 @@ async function showStatus(environment: ResolvedAgentEnvironment): Promise<void> 
     executable: backend.executable,
     args: ["config", "device", "show", backend.instance],
   });
+  const worker = environment.config.worker;
+  if (worker?.kind === "service") {
+    const state = await outputText(
+      guestUserCommand(environment, ["systemctl", "--user", "is-active", worker.unit]),
+    ).catch(() => "inactive");
+    console.log(`Guest service ${worker.unit}: ${state}`);
+    for (const service of environment.config.exposure?.services ?? []) {
+      if (service.tailscaleServe) {
+        await run({
+          executable: service.tailscaleServe.executable,
+          args: ["serve", "status"],
+        });
+        break;
+      }
+    }
+  }
 }
 
 async function showWorkerMetrics(environment: ResolvedAgentEnvironment): Promise<void> {
   const worker = environment.config.worker;
-  if (!worker) throw new Error("This agent environment does not declare a worker");
+  if (!worker || worker.kind !== "turn-loop") {
+    throw new Error("Worker metrics require a turn-loop worker");
+  }
   const path = `${worker.metricsDirectory}/campaign.json`;
   try {
     console.log(await Deno.readTextFile(path));
@@ -654,19 +1809,23 @@ export async function environmentCommand(args: string[]): Promise<void> {
   const separator = args.indexOf("--");
   const ownArgs = separator === -1 ? args : args.slice(0, separator);
   const execArgs = separator === -1 ? [] : args.slice(separator + 1);
-  let path = DEFAULT_ENVIRONMENT;
+  let path: string | undefined;
   let action:
     | "check"
     | "dry-run"
     | "apply"
     | "provision"
     | "seed"
+    | "force-seed"
     | "refresh"
     | "model-proxy"
     | "worker-once"
     | "worker-loop"
     | "worker-metrics"
     | "worker-dashboard"
+    | "service-start"
+    | "service-restart"
+    | "service-stop"
     | "status"
     | "exec"
     | undefined;
@@ -680,26 +1839,34 @@ export async function environmentCommand(args: string[]): Promise<void> {
     else if (arg === "--apply") setAction("apply");
     else if (arg === "--provision") setAction("provision");
     else if (arg === "--seed") setAction("seed");
+    else if (arg === "--force-seed") setAction("force-seed");
     else if (arg === "--refresh") setAction("refresh");
     else if (arg === "--model-proxy") setAction("model-proxy");
     else if (arg === "--worker-once") setAction("worker-once");
     else if (arg === "--worker-loop") setAction("worker-loop");
     else if (arg === "--worker-metrics") setAction("worker-metrics");
     else if (arg === "--worker-dashboard") setAction("worker-dashboard");
+    else if (arg === "--service-start") setAction("service-start");
+    else if (arg === "--service-restart") setAction("service-restart");
+    else if (arg === "--service-stop") setAction("service-stop");
     else if (arg === "--status") setAction("status");
     else if (arg === "--exec") setAction("exec");
     else if (arg.startsWith("-")) throw new Error(`Unknown env option: ${arg}`);
-    else if (path !== DEFAULT_ENVIRONMENT) {
+    else if (path !== undefined) {
       throw new Error("Only one environment CONFIG is accepted");
     } else path = arg;
   }
   if (!action) throw new Error(`An action is required\n\n${environmentUsage()}`);
+  if (!path) throw new Error(`An environment CONFIG is required\n\n${environmentUsage()}`);
   if (action !== "exec" && execArgs.length > 0) {
     throw new Error("Command argv is only valid with --exec");
   }
 
   const environment = await loadAgentEnvironment(path);
-  await validateEnvironment(environment);
+  await validateEnvironment(
+    environment,
+    ["check", "apply", "refresh", "service-start", "service-restart"].includes(action),
+  );
   if (action === "check") {
     console.log(`Valid agent environment: ${environment.config.name} (${environment.sourcePath})`);
   } else if (action === "dry-run") {
@@ -711,24 +1878,63 @@ export async function environmentCommand(args: string[]): Promise<void> {
     );
     for (const command of buildApplyPlan(environment)) console.log(formatCommand(command));
     console.log(formatCommand(buildProvisionCommand(environment)));
-    const seedCommands = buildSeedCommands(environment);
-    for (let index = 0; index < seedCommands.length; index += 5) {
-      console.log(formatCommand(seedCommands[index]));
+    console.log("if guest account is absent:");
+    for (const command of buildGuestUserCommands(environment)) console.log(formatCommand(command));
+    if (environment.config.guest.administration?.passwordlessSudo) {
+      console.log(`write /etc/sudoers.d/90-lm-tools-${environment.config.guest.user} mode=0440`);
+    }
+    for (const command of buildGuestAdministrationCommands(environment)) {
+      console.log(formatCommand(command));
+    }
+    for (const npmPackage of environment.config.guest.npmPackages ?? []) {
       console.log(
-        `${formatCommand(seedCommands[index + 1])} | ${formatCommand(seedCommands[index + 2])}`,
+        `verify npm integrity ${npmPackage.name}@${npmPackage.version}: ${npmPackage.integrity}`,
       );
-      console.log(formatCommand(seedCommands[index + 3]));
-      console.log(formatCommand(seedCommands[index + 4]));
+      console.log(formatCommand(buildNpmInstallCommand(environment, npmPackage)));
+    }
+    for (const seedCommands of buildSeedCommandGroups(environment)) {
+      console.log(formatCommand(seedCommands[0]));
+      console.log(
+        `${formatCommand(seedCommands[1])} | ${formatCommand(seedCommands[2])}`,
+      );
+      for (const command of seedCommands.slice(3)) console.log(formatCommand(command));
     }
     for (const command of buildHostServiceCommands(environment)) {
       console.log(formatCommand(command));
     }
+    const worker = environment.config.worker;
+    if (worker?.kind === "service") {
+      for (const input of worker.secretInputs ?? []) {
+        console.log(`write guest secret file ${input.target} mode=0600 < [REDACTED:${input.key}]`);
+      }
+      for (const step of worker.setup ?? []) {
+        if (step.registryIntegrity) {
+          console.log(
+            `verify npm integrity ${step.registryIntegrity.package}@${step.registryIntegrity.version}: ${step.registryIntegrity.integrity}`,
+          );
+        }
+        console.log(`if-not: ${formatCommand(guestUserCommand(environment, step.check))}`);
+        for (const expectation of step.checkJson ?? []) {
+          console.log(`  require ${expectation.pointer} = ${JSON.stringify(expectation.equals)}`);
+        }
+        console.log(formatCommand(guestUserCommand(environment, step.command)));
+      }
+      console.log(`write guest systemd user unit: ${worker.unit}`);
+    }
+    for (const command of buildExposureCommands(environment)) console.log(formatCommand(command));
   } else if (action === "apply") await applyEnvironment(environment);
-  else if (action === "provision") await provisionEnvironment(environment);
-  else if (action === "seed") await seedEnvironment(environment);
+  else if (action === "provision") {
+    await provisionEnvironment(environment);
+    await ensureGuestUser(environment);
+    await reconcileGuestAdministration(environment);
+    await provisionNpmPackages(environment);
+  } else if (action === "seed") await seedEnvironment(environment);
+  else if (action === "force-seed") await seedEnvironment(environment, false, false, true);
   else if (action === "refresh") {
     await seedEnvironment(environment, true);
     await reconcileHostServices(environment, true);
+    await reconcileServiceWorker(environment, true);
+    await reconcileExposure(environment);
   } else if (action === "model-proxy") await serveModelProxy(environment);
   else if (action === "worker-once") {
     const { run, ledger } = await runWorkerOnce(environment);
@@ -745,6 +1951,15 @@ export async function environmentCommand(args: string[]): Promise<void> {
   } else if (action === "worker-loop") await runWorkerLoop(environment);
   else if (action === "worker-metrics") await showWorkerMetrics(environment);
   else if (action === "worker-dashboard") await serveWorkerDashboard(environment);
+  else if (action === "service-start") {
+    await reconcileHostServices(environment);
+    await reconcileServiceWorker(environment);
+    await reconcileExposure(environment);
+  } else if (action === "service-restart") {
+    await reconcileHostServices(environment, true);
+    await reconcileServiceWorker(environment, true);
+    await reconcileExposure(environment);
+  } else if (action === "service-stop") await stopServiceWorker(environment);
   else if (action === "status") await showStatus(environment);
   else await execEnvironment(environment, execArgs);
 }

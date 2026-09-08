@@ -1,3 +1,4 @@
+import { parse as parseYaml, stringify as stringifyYaml } from "jsr:@std/yaml@1";
 import { Ajv2020, type ErrorObject } from "npm:ajv@8.17.1/dist/2020.js";
 import { dirname, resolve } from "jsr:@std/path@1";
 import {
@@ -22,8 +23,7 @@ import { checkVendorManifest, loadVendorManifest, vendorArtifact } from "./vendo
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const DEPLOYMENT_SCHEMA = `${PROJECT_ROOT}/schemas/deployment.schema.json`;
 const BASE_SCHEMA = `${PROJECT_ROOT}/schemas/base.schema.json`;
-const BASE_CONFIG = `${PROJECT_ROOT}/config/base.json`;
-const DEFAULT_DEPLOYMENT = `${PROJECT_ROOT}/deployments/qwen-vscode.json`;
+const DEFAULT_BASE_CONFIG = `${PROJECT_ROOT}/config/base.json`;
 
 type ReasoningEffort = "none" | "low" | "medium" | "high";
 type ReasoningLevel = ReasoningEffort | "minimal" | "xhigh" | "max";
@@ -46,6 +46,11 @@ interface ModelDeployment {
       url: string;
       size: number;
       sha256: string;
+    };
+    visionProjector?: {
+      path: string;
+      source: { url: string; size: number; sha256: string };
+      offload?: boolean;
     };
     capabilities: {
       tools: boolean;
@@ -79,9 +84,11 @@ interface ModelDeployment {
     tailscaleServe: DisabledService | TailscaleServe;
   };
   clients?: {
-    vscode: DisabledService | VscodeClient;
+    vscode?: DisabledService | VscodeClient;
+    codex?: DisabledService | CodexClient;
+    omp?: DisabledService | OmpClient;
   };
-  services?: Array<ProcessService | DiffusionGemmaLabService>;
+  services?: ProcessService[];
 }
 
 interface LlamaCppBackend {
@@ -146,6 +153,20 @@ interface VscodeClient {
   reasoningEffort: ReasoningEffort;
 }
 
+interface CodexClient {
+  enabled: true;
+  configPath: string;
+  providerId: string;
+  providerName: string;
+  reasoningEffort: string;
+}
+
+interface OmpClient {
+  enabled: true;
+  configPath: string;
+  providerId: string;
+}
+
 interface ProcessService {
   kind: "process";
   name: string;
@@ -157,14 +178,6 @@ interface ProcessService {
     url: string;
     timeoutSeconds: number;
   };
-}
-
-interface DiffusionGemmaLabService {
-  kind: "diffusiongemma-lab";
-  name: string;
-  checkout: string;
-  listen: ListenAddress;
-  readyTimeoutSeconds: number;
 }
 
 interface ResolvedProcessService {
@@ -183,19 +196,21 @@ type JsonObject = Record<string, unknown>;
 
 export interface ResolvedDeployment {
   sourcePath: string;
+  stateRoot: string;
   config: ModelDeployment;
   base: BaseConfig;
   llama?: LlamaOptions;
   proxy?: EnabledProxy;
   tailscaleServe?: TailscaleServe;
   vscode?: VscodeClient;
+  codex?: CodexClient;
+  omp?: OmpClient;
 }
 
 export function deployUsage(): string {
-  return `Usage: lm deploy [CONFIG] [options]
+  return `Usage: lm deploy CONFIG [options]
 
-Validate and run a complete local-model deployment. CONFIG defaults to:
-  ${DEFAULT_DEPLOYMENT}
+Validate and run a complete local-model deployment.
 
 Options:
   --check        Validate the schema, files, and installed backend flags
@@ -231,12 +246,13 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
     throw new Error(`Invalid deployment ${sourcePath}:\n${formatAjvErrors(validate.errors)}`);
   }
 
-  const base = JSON.parse(await Deno.readTextFile(BASE_CONFIG));
+  const baseConfigPath = resolve(Deno.env.get("LM_TOOLS_BASE_CONFIG") ?? DEFAULT_BASE_CONFIG);
+  const base = JSON.parse(await Deno.readTextFile(baseConfigPath));
   const baseSchema = JSON.parse(await Deno.readTextFile(BASE_SCHEMA));
   const validateBase = ajv.compile(baseSchema);
   if (!validateBase(base)) {
     throw new Error(
-      `Invalid base configuration ${BASE_CONFIG}:\n${formatAjvErrors(validateBase.errors)}`,
+      `Invalid base configuration ${baseConfigPath}:\n${formatAjvErrors(validateBase.errors)}`,
     );
   }
   const baseConfig = base as BaseConfig;
@@ -261,7 +277,9 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
   const tailscaleServe = config.exposure?.tailscaleServe.enabled
     ? config.exposure.tailscaleServe
     : undefined;
-  const vscode = config.clients?.vscode.enabled ? config.clients.vscode : undefined;
+  const vscode = config.clients?.vscode?.enabled ? config.clients.vscode : undefined;
+  const codex = config.clients?.codex?.enabled ? config.clients.codex : undefined;
+  const omp = config.clients?.omp?.enabled ? config.clients.omp : undefined;
   if (vscode && vscode.reasoningEffort !== "none" && !config.model.capabilities.reasoning) {
     throw new Error("VS Code reasoningEffort requires model.capabilities.reasoning=true");
   }
@@ -277,10 +295,34 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
       `VS Code reasoningEffort ${vscode.reasoningEffort} is not available for this model`,
     );
   }
-  if (backend.kind !== "llama.cpp" && (proxy || vscode || tailscaleServe)) {
+  if (
+    codex &&
+    !config.model.capabilities.supportedReasoningLevels?.includes(codex.reasoningEffort)
+  ) {
     throw new Error(
-      `${backend.kind} does not expose the HTTP API required by proxy/VS Code/Tailscale Serve`,
+      `Codex reasoningEffort ${codex.reasoningEffort} is not available for this model`,
     );
+  }
+  if (
+    backend.kind !== "llama.cpp" && (proxy || vscode || codex || omp || tailscaleServe)
+  ) {
+    throw new Error(
+      `${backend.kind} does not expose the HTTP API required by proxy/clients/Tailscale Serve`,
+    );
+  }
+  if (config.model.visionProjector && !config.model.capabilities.vision) {
+    throw new Error(
+      "visionProjector requires model.capabilities.vision=true",
+    );
+  }
+  if (config.model.visionProjector && backend.kind !== "llama.cpp") {
+    throw new Error("visionProjector currently requires backend.kind=llama.cpp");
+  }
+  if (
+    backend.kind === "llama.cpp" && config.model.capabilities.vision &&
+    !config.model.visionProjector
+  ) {
+    throw new Error("llama.cpp vision models require visionProjector");
   }
   const llama: LlamaOptions | undefined = backend.kind === "llama.cpp"
     ? {
@@ -303,12 +345,25 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
       draftModel: backend.speculative.kind === "dflash"
         ? backend.speculative.model.path
         : undefined,
+      mmproj: config.model.visionProjector?.path,
+      mmprojOffload: config.model.visionProjector?.offload,
       webui: backend.ui,
       dryRun: false,
       serverArgs: [],
     }
     : undefined;
-  return { sourcePath, config, base: baseConfig, llama, proxy, tailscaleServe, vscode };
+  return {
+    sourcePath,
+    stateRoot: resolve(Deno.env.get("LM_TOOLS_STATE_DIR") ?? PROJECT_ROOT),
+    config,
+    base: baseConfig,
+    llama,
+    proxy,
+    tailscaleServe,
+    vscode,
+    codex,
+    omp,
+  };
 }
 
 function clientReasoningLevelMap(
@@ -419,9 +474,179 @@ export function buildPiProvider(deployment: ResolvedDeployment, baseUrl: string)
   };
 }
 
+/** Build the custom provider entry consumed by the omp `~/.omp/agent/models.yml` schema. */
+export function buildOmpProvider(deployment: ResolvedDeployment, baseUrl: string): JsonObject {
+  const config = deployment.config;
+  const providerId = deployment.omp?.providerId ?? config.name;
+  return {
+    providers: {
+      [providerId]: {
+        baseUrl,
+        api: "openai-responses",
+        auth: "none",
+        models: [
+          {
+            id: config.model.id,
+            name: config.model.name,
+            reasoning: config.model.capabilities.reasoning,
+            ...(config.model.capabilities.supportedReasoningLevels
+              ? {
+                compat: {
+                  reasoningEffortMap: Object.fromEntries(
+                    Object.entries(clientReasoningLevelMap(deployment, "pi")).filter(
+                      ([, wireLevel]) => wireLevel !== null,
+                    ),
+                  ),
+                },
+              }
+              : {}),
+            input: config.model.capabilities.vision ? ["text", "image"] : ["text"],
+            contextWindow: config.runtime.contextWindow,
+            maxTokens: config.runtime.maxOutputTokens,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
+      },
+    },
+  };
+}
+
+/** Render the standalone omp models.yml snippet written beside the other client snippets. */
+export function buildOmpModelsYml(deployment: ResolvedDeployment, baseUrl: string): string {
+  return [
+    "# Generated by lm-tools. Merge the providers block into ~/.omp/agent/models.yml.",
+    stringifyYaml(buildOmpProvider(deployment, baseUrl)).trimEnd(),
+    "",
+  ].join("\n");
+}
+
+/** Merge a generated provider into an existing omp models.yml document. */
+export function mergeOmpProvider(existing: unknown, generated: JsonObject): JsonObject {
+  const base = existing && typeof existing === "object" && !Array.isArray(existing)
+    ? existing as JsonObject
+    : {};
+  const generatedProviders = generated.providers as JsonObject;
+  const existingProviders = base.providers && typeof base.providers === "object" &&
+      !Array.isArray(base.providers)
+    ? base.providers as JsonObject
+    : {};
+  return {
+    ...base,
+    providers: { ...existingProviders, ...generatedProviders },
+  };
+}
+
+function reasoningDescription(effort: string): string {
+  switch (effort) {
+    case "none":
+      return "No extended reasoning";
+    case "minimal":
+      return "Minimal reasoning";
+    case "low":
+      return "Faster, lighter reasoning";
+    case "medium":
+      return "Balanced speed and reasoning";
+    case "high":
+      return "Deeper reasoning";
+    case "xhigh":
+      return "Maximum reasoning";
+    default:
+      return effort;
+  }
+}
+
+/** Build the model catalog consumed by Codex CLI and the Codex/ChatGPT desktop app. */
+export function buildCodexModelCatalog(
+  deployment: ResolvedDeployment,
+): JsonObject | undefined {
+  const client = deployment.codex;
+  if (!client) return undefined;
+  const config = deployment.config;
+  const capabilities = config.model.capabilities;
+  const supportedReasoningLevels = capabilities.supportedReasoningLevels ?? [];
+  const localModel: JsonObject = {
+    slug: config.model.id,
+    display_name: config.model.name,
+    description: `${config.model.name} served by lm-tools.`,
+    default_reasoning_level: client.reasoningEffort,
+    supported_reasoning_levels: supportedReasoningLevels.map((effort) => ({
+      effort,
+      description: reasoningDescription(effort),
+    })),
+    shell_type: "shell_command",
+    visibility: "list",
+    supported_in_api: true,
+    priority: 1000,
+    availability_nux: null,
+    upgrade: null,
+    model_messages: {
+      instructions_template:
+        "You are Codex, a coding agent running against a local model through lm-tools. " +
+        "Work directly in the user's repository, follow its instructions, and verify your changes.",
+      instructions_variables: null,
+      approvals: null,
+    },
+    include_skills_usage_instructions: true,
+    include_plugin_usage_instructions: true,
+    include_apps_usage_instructions: true,
+    supports_reasoning_summary_parameter: false,
+    default_reasoning_summary: "none",
+    support_verbosity: false,
+    default_verbosity: null,
+    apply_patch_tool_type: "freeform",
+    web_search_tool_type: "text_and_image",
+    truncation_policy: { mode: "bytes", limit: 10_000 },
+    supports_image_detail_original: capabilities.vision,
+    context_window: config.runtime.contextWindow,
+    max_context_window: config.runtime.contextWindow,
+    auto_compact_token_limit: Math.floor(config.runtime.contextWindow * 0.8),
+    experimental_supported_tools: [],
+    input_modalities: capabilities.vision ? ["text", "image"] : ["text"],
+    supports_search_tool: false,
+  };
+  return {
+    models: [localModel],
+  };
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+/** Build the isolated configuration consumed through CODEX_HOME by local launchers. */
+export function buildCodexConfig(
+  deployment: ResolvedDeployment,
+  baseUrl: string,
+  catalogPath: string,
+): string | undefined {
+  const client = deployment.codex;
+  if (!client) return undefined;
+  const config = deployment.config;
+  return [
+    "# Generated by lm-tools for an isolated CODEX_HOME. Do not merge into ~/.codex/config.toml.",
+    `model = ${tomlString(config.model.id)}`,
+    `model_provider = ${tomlString(client.providerId)}`,
+    `model_catalog_json = ${tomlString(catalogPath)}`,
+    `model_reasoning_effort = ${tomlString(client.reasoningEffort)}`,
+    `model_context_window = ${config.runtime.contextWindow}`,
+    `model_auto_compact_token_limit = ${Math.floor(config.runtime.contextWindow * 0.8)}`,
+    "",
+    `[model_providers.${client.providerId}]`,
+    `name = ${tomlString(client.providerName)}`,
+    `base_url = ${tomlString(baseUrl)}`,
+    'wire_api = "responses"',
+    "requires_openai_auth = false",
+    "supports_websockets = false",
+    "request_max_retries = 3",
+    "stream_max_retries = 3",
+    "stream_idle_timeout_ms = 600000",
+    "",
+  ].join("\n");
+}
+
 export function apiJsonDirectory(deployment: ResolvedDeployment): string {
   const modelDirectory = deployment.config.model.id.replaceAll(/[^A-Za-z0-9._-]/g, "-");
-  return `${PROJECT_ROOT}/api-jsons/${modelDirectory}`;
+  return `${deployment.stateRoot}/api-jsons/${modelDirectory}`;
 }
 
 export function mergeVscodeProvider(existing: unknown, generated: JsonObject): JsonObject[] {
@@ -443,6 +668,18 @@ async function writeJsonAtomically(path: string, value: unknown): Promise<void> 
   const temporary = await Deno.makeTempFile({ dir: dirname(path), prefix: ".lm-tools-" });
   try {
     await Deno.writeTextFile(temporary, `${JSON.stringify(value, null, 2)}\n`);
+    await Deno.rename(temporary, path);
+  } catch (error) {
+    await Deno.remove(temporary).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function writeTextAtomically(path: string, value: string): Promise<void> {
+  await Deno.mkdir(dirname(path), { recursive: true });
+  const temporary = await Deno.makeTempFile({ dir: dirname(path), prefix: ".lm-tools-" });
+  try {
+    await Deno.writeTextFile(temporary, value);
     await Deno.rename(temporary, path);
   } catch (error) {
     await Deno.remove(temporary).catch(() => undefined);
@@ -501,14 +738,39 @@ async function writeApiJsons(deployment: ResolvedDeployment): Promise<string[] |
   if (deployment.config.backend.kind !== "llama.cpp") return undefined;
   const directory = apiJsonDirectory(deployment);
   const baseUrl = await clientApiBaseUrl(deployment);
-  const outputs: Array<[string, JsonObject | undefined]> = [
+  const codexCatalogPath = `${directory}/codex-model-catalog.json`;
+  const codexConfig = buildCodexConfig(deployment, baseUrl, codexCatalogPath);
+  const outputs: Array<[string, JsonObject | string | undefined]> = [
     [`${directory}/vscode.json`, buildVscodeProvider(deployment, baseUrl)],
     [`${directory}/pi.json`, buildPiProvider(deployment, baseUrl)],
+    [
+      `${directory}/omp-models.yml`,
+      deployment.omp ? buildOmpModelsYml(deployment, baseUrl) : undefined,
+    ],
+    [codexCatalogPath, buildCodexModelCatalog(deployment)],
+    [`${directory}/codex-config.toml`, codexConfig],
+    [deployment.codex?.configPath ?? "", codexConfig],
   ];
   const written: string[] = [];
   for (const [path, value] of outputs) {
-    if (!value) continue;
-    await writeJsonAtomically(path, value);
+    if (!path || !value) continue;
+    if (typeof value === "string") {
+      await writeTextAtomically(path, value);
+    } else {
+      await writeJsonAtomically(path, value);
+    }
+    written.push(path);
+  }
+  if (deployment.omp) {
+    const path = deployment.omp.configPath;
+    let existing: unknown = {};
+    try {
+      existing = parseYaml(await Deno.readTextFile(path));
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
+    const merged = mergeOmpProvider(existing, buildOmpProvider(deployment, baseUrl));
+    await writeTextAtomically(path, `${stringifyYaml(merged).trimEnd()}\n`);
     written.push(path);
   }
   return written;
@@ -529,31 +791,10 @@ function buildDiffusionRunnerArgs(backend: LlamaCppDiffusionBackend): string[] {
 }
 
 function resolveProcessService(
-  deployment: ResolvedDeployment,
-  service: ProcessService | DiffusionGemmaLabService,
+  _deployment: ResolvedDeployment,
+  service: ProcessService,
 ): ResolvedProcessService {
-  if (service.kind === "process") return service;
-  const backend = deployment.config.backend;
-  if (backend.kind !== "llama.cpp-diffusion") {
-    throw new Error(`${service.kind} requires backend.kind=llama.cpp-diffusion`);
-  }
-  return {
-    name: service.name,
-    executable: "/usr/bin/npm",
-    args: ["run", "dev"],
-    cwd: service.checkout,
-    environment: {
-      PORT: String(service.listen.port),
-      MODEL_PATH: deployment.config.model.path,
-      LLAMA_BINARY: backend.executable,
-      LLAMA_EXTRA_ARGS: buildDiffusionRunnerArgs(backend).join(" "),
-      SKIP_MODEL_SETUP: "1",
-    },
-    ready: {
-      url: `http://${service.listen.host}:${service.listen.port}/api/status`,
-      timeoutSeconds: service.readyTimeoutSeconds,
-    },
-  };
+  return service;
 }
 
 async function validateInstalledBackend(
@@ -685,6 +926,10 @@ async function fetchModelArtifacts(deployment: ResolvedDeployment): Promise<void
   const { path, source } = deployment.config.model;
   if (!source) throw new Error(`Model ${deployment.config.model.id} has no source to fetch`);
   await fetchArtifact("model artifact", path, source);
+  const projector = deployment.config.model.visionProjector;
+  if (projector) {
+    await fetchArtifact("vision projector", projector.path, projector.source);
+  }
   const backend = deployment.config.backend;
   if (backend.kind === "llama.cpp" && backend.speculative.kind === "dflash") {
     await fetchArtifact(
@@ -795,6 +1040,20 @@ function printPlan(deployment: ResolvedDeployment): void {
   if (deployment.vscode) {
     console.log(`VS Code:    ${deployment.vscode.configPath}`);
     console.log(JSON.stringify(buildVscodeProvider(deployment), null, 2));
+  }
+  if (deployment.codex) {
+    const endpoint = deploymentHttpEndpoint(deployment);
+    const baseUrl = `http://${endpoint.host}:${endpoint.port}/v1`;
+    const catalogPath = `${apiJsonDirectory(deployment)}/codex-model-catalog.json`;
+    console.log(`Codex:      ${catalogPath}`);
+    console.log(JSON.stringify(buildCodexModelCatalog(deployment), null, 2));
+    console.log(buildCodexConfig(deployment, baseUrl, catalogPath));
+  }
+  if (deployment.omp) {
+    const endpoint = deploymentHttpEndpoint(deployment);
+    const baseUrl = `http://${endpoint.host}:${endpoint.port}/v1`;
+    console.log(`omp:        ${deployment.omp.configPath}`);
+    console.log(buildOmpModelsYml(deployment, baseUrl));
   }
   for (const service of deployment.config.services ?? []) {
     const resolved = resolveProcessService(deployment, service);
@@ -975,7 +1234,7 @@ export async function deployCommand(args: string[]): Promise<void> {
     console.log(deployUsage());
     return;
   }
-  let path = DEFAULT_DEPLOYMENT;
+  let path: string | undefined;
   let check = false;
   let dryRun = false;
   let fetch = false;
@@ -993,6 +1252,8 @@ export async function deployCommand(args: string[]): Promise<void> {
       positionalSeen = true;
     }
   }
+
+  if (!path) throw new Error(`A deployment CONFIG is required\n\n${deployUsage()}`);
 
   const deployment = await loadDeployment(path);
   if ([check, dryRun, fetch, clientOnly].filter(Boolean).length > 1) {

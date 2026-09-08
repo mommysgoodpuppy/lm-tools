@@ -39,6 +39,33 @@ Deno.test("resolves declarative vendor checkout variables and artifacts", async 
   }
 });
 
+Deno.test("resolves root relative to the manifest-owning project", async () => {
+  const root = await Deno.makeTempDir();
+  try {
+    const vendors = join(root, "vendors");
+    await Deno.mkdir(vendors);
+    const manifestPath = join(vendors, "vendor.json");
+    await Deno.writeTextFile(
+      manifestPath,
+      JSON.stringify({
+        version: 1,
+        name: "portable-build",
+        checkouts: [{
+          name: "engine",
+          repository: "https://example.com/engine.git",
+          revision: "0123456789abcdef0123456789abcdef01234567",
+          path: "${root}/vendor/engine",
+        }],
+        artifacts: [{ name: "result", path: "${root}/build/result", kind: "file" }],
+      }),
+    );
+    const resolved = await loadVendorManifest(manifestPath);
+    assertEquals(vendorArtifact(resolved, "result"), join(root, "build", "result"));
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 Deno.test("rejects unknown vendor manifest variables", async () => {
   const root = await Deno.makeTempDir();
   try {

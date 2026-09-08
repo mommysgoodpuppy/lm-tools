@@ -1,5 +1,5 @@
 import { dirname, join } from "jsr:@std/path@1";
-import type { ResolvedAgentEnvironment } from "./agent_environment.ts";
+import type { ResolvedAgentEnvironment, TurnLoopWorker } from "./agent_environment.ts";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -37,7 +37,7 @@ interface WorkerRun {
 export interface TurnResearchSummary {
   runId: string;
   generatedAt: string;
-  source: "qwen-generated" | "manual-backfill" | "fallback";
+  source: "model-generated" | "qwen-generated" | "manual-backfill" | "fallback";
   title: string;
   status: "progress" | "blocked" | "falsified" | "measurement-requested" | "candidate-ready";
   summary: string;
@@ -123,7 +123,7 @@ export function parseTurnResearchSummary(text: string, runId: string): TurnResea
   return {
     runId,
     generatedAt: new Date().toISOString(),
-    source: "qwen-generated",
+    source: "model-generated",
     title: textField(value.title, "title"),
     status,
     summary: textField(value.summary, "summary"),
@@ -700,19 +700,10 @@ async function runPiRpcTurn(
 ): Promise<{ exitCode: number; timedOut: boolean; lines: string[] }> {
   const worker = workerConfig(environment);
   const { backend, guest } = environment.config;
-  const piCommand = worker.command ?? [
-    "pi",
-    "--mode",
-    "rpc",
-    "--no-session",
-    "--provider",
-    "local-qwen",
-    "--model",
-    "qwen3.8-27b",
-    "--thinking",
-    "medium",
-    "--approve",
-  ];
+  const piCommand = worker.command;
+  if (!piCommand?.length) {
+    throw new Error("A pi-rpc worker requires an explicit worker.command");
+  }
   const command = new Deno.Command("/usr/bin/timeout", {
     args: [
       "--signal=TERM",
@@ -1188,8 +1179,7 @@ async function generateTurnSummary(
   const evidence = `RUN FACTS\n${JSON.stringify(facts, null, 2)}\n\n` +
     `DURABLE STATE AFTER TURN\n${clipText(input.state ?? "unavailable", stateBudget)}\n\n` +
     `SELECTED TURN EVENTS\n${compactTurnTranscript(input.lines, transcriptBudget)}`;
-  const prompt =
-    `You are the research recorder for an autonomous tinygrad optimization campaign. ` +
+  const prompt = `You are the research recorder for an autonomous software research campaign. ` +
     `Summarize the completed worker turn from the supplied evidence. Be accurate and concrete: ` +
     `separate observed evidence from hypotheses, say when no implementation was made, preserve ` +
     `important measurements and failed approaches, and name the most useful next action. Do not ` +
@@ -1266,9 +1256,11 @@ async function updateLedger(
   return ledger;
 }
 
-function workerConfig(environment: ResolvedAgentEnvironment) {
+function workerConfig(environment: ResolvedAgentEnvironment): TurnLoopWorker {
   const worker = environment.config.worker;
-  if (!worker) throw new Error("This agent environment does not declare a worker");
+  if (!worker || worker.kind !== "turn-loop") {
+    throw new Error("This action requires a turn-loop worker");
+  }
   return worker;
 }
 

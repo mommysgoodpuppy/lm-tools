@@ -5,7 +5,7 @@ import {
   spawnLlama,
   validateLlamaOptions,
 } from "./llama.ts";
-import { serveProxy } from "./proxy.ts";
+import { InferenceTracker, serveProxy } from "./proxy.ts";
 import type { PromptEvaluationProgress, PromptProgressSource } from "./proxy.ts";
 import { defaultDiagnosticLog } from "./log.ts";
 import { terminateChild } from "./process_manager.ts";
@@ -79,22 +79,6 @@ async function mirrorAndInspect(
   }
 }
 
-export function vscodeUsage(): string {
-  return `Usage: lm vscode [MODEL] [llama options] [-- llama-server args]
-
-Starts llama-server and the VS Code compatibility proxy together.
-
-Defaults specific to this command:
-  context       128k
-  KV cache      q8_0 keys / q4_0 values
-  MTP drafting  2 tokens
-  llama-server  http://127.0.0.1:8080
-  VS Code URL   http://${DEFAULT_PROXY_HOST}:${DEFAULT_PROXY_PORT}/v1/responses
-
-All \"lm llama\" options are accepted. The compatibility proxy intentionally
-listens only on localhost in this combined mode.`;
-}
-
 async function waitUntilReady(url: string, child: Deno.ChildProcess): Promise<void> {
   const deadline = performance.now() + 120_000;
   while (performance.now() < deadline) {
@@ -112,26 +96,6 @@ async function waitUntilReady(url: string, child: Deno.ChildProcess): Promise<vo
     }
   }
   throw new Error("Timed out waiting for llama-server health check");
-}
-
-export async function vscodeCommand(args: string[]): Promise<void> {
-  if (args.includes("--help") || args.includes("-h")) {
-    console.log(vscodeUsage());
-    return;
-  }
-  const inherited = Deno.env.toObject();
-  const options = parseLlamaArgs(args, {
-    ...inherited,
-    CONTEXT_SIZE: inherited.CONTEXT_SIZE ?? "128k",
-    KV_CACHE_TYPE_K: inherited.KV_CACHE_TYPE_K ?? inherited.KV_CACHE_TYPE ?? "q8_0",
-    KV_CACHE_TYPE_V: inherited.KV_CACHE_TYPE_V ?? inherited.KV_CACHE_TYPE ?? "q4_0",
-    MTP_DRAFT_TOKENS: inherited.MTP_DRAFT_TOKENS ?? "2",
-  });
-  await runVscodeStack(options, {
-    proxyHost: DEFAULT_PROXY_HOST,
-    proxyPort: DEFAULT_PROXY_PORT,
-    modelAlias: "qwen3.8-27b",
-  });
 }
 
 export async function runVscodeStack(
@@ -170,6 +134,7 @@ export async function runVscodeStack(
     draftModel: options.draftModel,
   });
   const progress = new LlamaPromptProgress();
+  const inference = new InferenceTracker(options.context);
   const child = spawnLlama(options, "piped");
   const outputTasks = [
     mirrorAndInspect(child.stdout, Deno.stdout, (line) => {
@@ -203,6 +168,7 @@ export async function runVscodeStack(
       listenPort: stack.proxyPort,
       upstream: new URL(`http://${options.host}:${options.port}`),
       promptProgress: progress,
+      inference,
       reasoningEffortMap: stack.reasoningEffortMap,
       diagnostics,
     }, abort.signal);

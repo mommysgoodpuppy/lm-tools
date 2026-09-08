@@ -1,5 +1,5 @@
 import { Ajv2020, type ErrorObject } from "npm:ajv@8.17.1/dist/2020.js";
-import { dirname, resolve } from "jsr:@std/path@1";
+import { basename, dirname, resolve } from "jsr:@std/path@1";
 import { shellQuote } from "./llama.ts";
 
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
@@ -55,7 +55,8 @@ Options:
   --dry-run  Print the resolved Git, patch, and build commands
   --help     Show this help
 
-Manifest strings may use \${root}, \${manifest}, and \${checkout.NAME}.`;
+Manifest strings may use \${root}, \${manifest}, and \${checkout.NAME}.
+For a manifest in a vendors directory, \${root} is the directory containing vendors.`;
 }
 
 function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
@@ -113,7 +114,8 @@ export async function loadVendorManifest(path: string): Promise<ResolvedVendorMa
   }
 
   const manifestRoot = dirname(sourcePath);
-  const variables = new Map<string, string>([["root", PROJECT_ROOT], ["manifest", manifestRoot]]);
+  const ownerRoot = basename(manifestRoot) === "vendors" ? dirname(manifestRoot) : manifestRoot;
+  const variables = new Map<string, string>([["root", ownerRoot], ["manifest", manifestRoot]]);
   const checkouts = new Map<
     string,
     VendorCheckout & { resolvedPath: string; resolvedPatches: string[] }
@@ -237,9 +239,11 @@ export async function checkVendorManifest(resolved: ResolvedVendorManifest): Pro
 function resolvedSteps(
   resolved: ResolvedVendorManifest,
 ): Array<VendorStep & { run: string[]; cwd: string }> {
+  const manifestRoot = dirname(resolved.sourcePath);
+  const ownerRoot = basename(manifestRoot) === "vendors" ? dirname(manifestRoot) : manifestRoot;
   const variables = new Map<string, string>([
-    ["root", PROJECT_ROOT],
-    ["manifest", dirname(resolved.sourcePath)],
+    ["root", ownerRoot],
+    ["manifest", manifestRoot],
     ...[...resolved.checkouts].map(([name, checkout]) =>
       [`checkout.${name}`, checkout.resolvedPath] as [string, string]
     ),
@@ -247,7 +251,7 @@ function resolvedSteps(
   return (resolved.manifest.steps ?? []).map((step) => ({
     ...step,
     run: step.run.map((part) => substitute(part, variables)),
-    cwd: resolve(dirname(resolved.sourcePath), substitute(step.cwd ?? "${root}", variables)),
+    cwd: resolve(manifestRoot, substitute(step.cwd ?? "${root}", variables)),
     environment: step.environment
       ? Object.fromEntries(
         Object.entries(step.environment).map(([key, value]) => [key, substitute(value, variables)]),
