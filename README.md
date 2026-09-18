@@ -8,6 +8,7 @@ intentionally owned by separate projects.
 
 ```text
 lm benchmark   replay a captured request and collect timing/VRAM measurements
+lm claw        manage a declared unbounded standing agent (claw)
 lm deploy      validate and run a model deployment
 lm download    download large artifacts with resume and integrity checks
 lm env         manage an isolated declarative agent environment
@@ -68,7 +69,9 @@ Environment files use
 [`schemas/agent-environment.schema.json`](schemas/agent-environment.schema.json). The Incus backend
 creates unprivileged workspaces, provisions pinned packages, copies declared seeds with filtered tar
 streams, imports protected inputs without placing their values in argv, and can supervise either
-bounded turn-loop workers or persistent service workers.
+bounded attempt harnesses or persistent service harnesses. Harness adapters are the
+`harness.adapter` field of an environment: `omp-rpc`, `app-server` (Codex), `pi-rpc`, `exec-json`,
+or a service runtime such as the Hermes gateway.
 
 ```bash
 deno run -A main.ts env project/environment.json --check
@@ -80,6 +83,29 @@ deno run -A main.ts env project/environment.json --status
 
 Secrets should remain ignored by the consuming project. Secret inputs must be mode `0600`, ignored
 by Git, declared separately from ordinary seeds, and targeted outside the guest workspace.
+
+## Claws
+
+A claw is an unbounded standing agent — open-ended conversations, self-scheduled work, persistent
+identity, memory, and workspace. Claw manifests use
+[`schemas/claw.schema.json`](schemas/claw.schema.json) and compose exactly three declared parts:
+inference (a model deployment, a free-router configuration, or both), a service harness (for example
+the Hermes gateway), and an isolation environment. An optional `observability` section declares the
+append-only audit journal. See [`docs/concepts.md`](docs/concepts.md) for the campaign/claw split.
+
+```bash
+deno run -A main.ts claw project/claw.json --check
+deno run -A main.ts claw project/claw.json --dry-run
+deno run -A main.ts claw project/claw.json --apply
+deno run -A main.ts claw project/claw.json --start
+deno run -A main.ts claw project/claw.json --restart
+deno run -A main.ts claw project/claw.json --stop
+deno run -A main.ts claw project/claw.json --status
+```
+
+A claw's declared state — workspace, seeds, secrets, exposure — is preserved across refresh; only
+declared control files are refreshed. Swap the `inference`, `harness`, and identity (secrets) parts
+to deploy a different standing agent against the same manifest shape.
 
 ## Vendor builds
 

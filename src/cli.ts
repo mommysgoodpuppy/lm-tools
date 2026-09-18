@@ -3,6 +3,7 @@ import { benchmarkCommand, benchmarkUsage } from "./benchmark.ts";
 import { downloadCommand, downloadUsage } from "./download.ts";
 import { deployCommand, deployUsage } from "./deployment.ts";
 import { environmentCommand, environmentUsage } from "./agent_environment.ts";
+import { clawCommand, clawUsage } from "./claw.ts";
 import { llamaCommand, llamaUsage } from "./llama.ts";
 import { freeRouterCommand, freeRouterUsage } from "./free_router_server.ts";
 import { proxyCommand, proxyUsage } from "./proxy.ts";
@@ -21,6 +22,7 @@ Commands:
   download  Resumable parallel download for large model files
   deploy    Validate and run a declarative model deployment
   env       Manage a declarative isolated agent environment
+  claw      Manage a declared unbounded standing agent (claw)
   free-router  Serve an explicitly zero-priced remote inference pool
   kill-everything  Stop all configured model services and inference processes
   llama     Launch llama-server with useful local defaults
@@ -47,6 +49,9 @@ export async function main(args: string[]): Promise<void> {
     case "env":
     case "environment":
       await environmentCommand(commandArgs);
+      return;
+    case "claw":
+      await clawCommand(commandArgs);
       return;
     case "kill-everything":
       await killEverythingCommand(commandArgs);
@@ -75,6 +80,8 @@ export async function main(args: string[]): Promise<void> {
           ? deployUsage()
           : topic === "env" || topic === "environment"
           ? environmentUsage()
+          : topic === "claw"
+          ? clawUsage()
           : topic === "kill-everything"
           ? killEverythingUsage()
           : topic === "free-router"

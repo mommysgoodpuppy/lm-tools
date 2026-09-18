@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lm-tools.local/schemas/claw.schema.json",
+  "title": "lm-tools claw (unbounded standing agent)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "inference", "harness", "environment"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 2 },
+    "name": {
+      "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/nonEmptyString"
+    },
+    "inference": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "modelDeployment": {
+          "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/nonEmptyString"
+        },
+        "freeRouter": {
+          "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "harness": {
+      "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/serviceHarness"
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "guest"],
+      "properties": {
+        "backend": {
+          "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/incusBackend"
+        },
+        "guest": {
+          "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/guest"
+        },
+        "exposure": {
+          "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/exposure"
+        },
+        "hostServices": {
+          "type": "array",
+          "items": {
+            "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/hostService"
+          }
+        },
+        "readOnlyMounts": {
+          "type": "array",
+          "items": {
+            "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/readOnlyMount"
+          }
+        },
+        "seeds": {
+          "type": "array",
+          "items": {
+            "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/seed"
+          }
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["journalPath"],
+      "properties": {
+        "journalPath": {
+          "$ref": "https://lm-tools.local/schemas/agent-environment.schema.json#/$defs/nonEmptyString"
+        },
+        "maximumJournalBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483648
+        }
+      }
+    }
+  }
+}
