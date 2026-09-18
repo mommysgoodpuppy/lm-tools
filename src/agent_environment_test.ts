@@ -1,12 +1,40 @@
 import { assertEquals } from "jsr:@std/assert@1/equals";
 import { assertThrows } from "jsr:@std/assert@1/throws";
 import {
+  buildReadOnlyMountAddCommand,
   buildSeedArchive,
   isSupportedHostUnit,
   npmRegistryIntegrity,
   parseStrictDotenv,
   tailscaleServeNeedsApply,
 } from "./agent_environment.ts";
+
+Deno.test("read-only Incus mounts are explicit and immutable in the guest", () => {
+  const environment = {
+    config: { backend: { executable: "/usr/bin/incus", instance: "agent" } },
+  } as Parameters<typeof buildReadOnlyMountAddCommand>[0];
+  assertEquals(
+    buildReadOnlyMountAddCommand(environment, {
+      name: "system-updates",
+      source: "/host/system-updates",
+      target: "/home/agent/system-updates",
+    }),
+    {
+      executable: "/usr/bin/incus",
+      args: [
+        "config",
+        "device",
+        "add",
+        "agent",
+        "system-updates",
+        "disk",
+        "source=/host/system-updates",
+        "path=/home/agent/system-updates",
+        "readonly=true",
+      ],
+    },
+  );
+});
 
 Deno.test("host service units include socket activation", () => {
   assertEquals(isSupportedHostUnit("worker.service"), true);

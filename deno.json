@@ -3,6 +3,7 @@
     "lm": "deno run -A main.ts",
     "kill-everything": "deno run -A main.ts kill-everything",
     "t3code:build": "deno run --allow-read --allow-write --allow-run=node,corepack scripts/build_t3code.ts",
+    "omp:check": "deno run --allow-read --allow-run=git,omp scripts/check_omp.ts",
     "check": "deno check main.ts src/**/*.ts scripts/**/*.ts",
     "test": "deno test -A src/",
     "verify": "deno fmt --check && deno lint && deno task check && deno task test"

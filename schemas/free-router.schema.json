@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lm-tools.local/schemas/free-router.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "listen", "omp", "models"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "listen": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "port"],
+      "properties": {
+        "host": { "$ref": "#/$defs/nonEmptyString" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "omp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseUrl"],
+      "properties": {
+        "baseUrl": { "type": "string", "pattern": "^https?://" },
+        "bearerTokenFile": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowPaid": { "type": "boolean", "default": false },
+        "allowLocal": { "type": "boolean", "default": false }
+      }
+    },
+    "observer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "journalPath": { "$ref": "#/$defs/nonEmptyString" },
+        "maximumRequests": { "type": "integer", "minimum": 1 },
+        "maximumRetainedCharacters": { "type": "integer", "minimum": 1 },
+        "maximumJournalBytes": { "type": "integer", "minimum": 1, "maximum": 2147483648 }
+      }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "offers"],
+        "properties": {
+          "id": { "$ref": "#/$defs/nonEmptyString" },
+          "contextLength": { "type": "integer", "minimum": 1 },
+          "maxOutputTokens": { "type": "integer", "minimum": 1 },
+          "offers": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/$defs/offer" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "pricing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputUsdPerMillion", "outputUsdPerMillion"],
+      "properties": {
+        "inputUsdPerMillion": { "type": "number", "minimum": 0 },
+        "outputUsdPerMillion": { "type": "number", "minimum": 0 },
+        "cacheReadUsdPerMillion": { "type": "number", "minimum": 0 },
+        "cacheWriteUsdPerMillion": { "type": "number", "minimum": 0 }
+      }
+    },
+    "offer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "adapter", "provider", "model", "accessClass", "pricing"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonEmptyString" },
+        "adapter": { "const": "omp" },
+        "provider": { "$ref": "#/$defs/nonEmptyString" },
+        "model": { "$ref": "#/$defs/nonEmptyString" },
+        "accessClass": { "enum": ["free", "contributor", "paid", "local"] },
+        "pricing": { "$ref": "#/$defs/pricing" },
+        "priority": { "type": "number" }
+      }
+    }
+  }
+}

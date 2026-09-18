@@ -127,6 +127,11 @@ export interface AgentEnvironmentConfig {
     restartOnRefresh: boolean;
     environmentInputs?: Array<{ source: string; key: string }>;
   }>;
+  readOnlyMounts?: Array<{
+    name: string;
+    source: string;
+    target: string;
+  }>;
   worker?: TurnLoopWorker | ServiceWorker;
   exposure?: {
     services: Array<{
@@ -274,8 +279,31 @@ export function buildApplyPlan(environment: ResolvedAgentEnvironment): CommandSp
       ],
     },
     ...(backend.network.address ? [buildNetworkAddressCommand(environment, false)!] : []),
+    ...(environment.config.readOnlyMounts ?? []).map((mount) =>
+      buildReadOnlyMountAddCommand(environment, mount)
+    ),
     { executable: incus, args: ["start", backend.instance] },
   ];
+}
+
+export function buildReadOnlyMountAddCommand(
+  environment: ResolvedAgentEnvironment,
+  mount: NonNullable<AgentEnvironmentConfig["readOnlyMounts"]>[number],
+): CommandSpec {
+  return {
+    executable: environment.config.backend.executable,
+    args: [
+      "config",
+      "device",
+      "add",
+      environment.config.backend.instance,
+      mount.name,
+      "disk",
+      `source=${mount.source}`,
+      `path=${mount.target}`,
+      "readonly=true",
+    ],
+  };
 }
 
 export function buildSeedCommands(environment: ResolvedAgentEnvironment): CommandSpec[] {
@@ -961,6 +989,25 @@ async function validateEnvironment(
     if (serviceNames.has(unit)) throw new Error(`Duplicate host service unit: ${unit}`);
     serviceNames.add(unit);
   }
+  const mountNames = new Set<string>();
+  for (const mount of environment.config.readOnlyMounts ?? []) {
+    if (!mount.source.startsWith("/") || resolve(mount.source) !== mount.source) {
+      throw new Error(
+        `Read-only mount source must be an absolute normalized path: ${mount.source}`,
+      );
+    }
+    if (!mount.target.startsWith("/") || resolve(mount.target) !== mount.target) {
+      throw new Error(
+        `Read-only mount target must be an absolute normalized path: ${mount.target}`,
+      );
+    }
+    const source = await Deno.lstat(mount.source).catch(() => undefined);
+    if (!source?.isDirectory && !source?.isFile) {
+      throw new Error(`Read-only mount source not found: ${mount.source}`);
+    }
+    if (mountNames.has(mount.name)) throw new Error(`Duplicate read-only mount: ${mount.name}`);
+    mountNames.add(mount.name);
+  }
   const worker = environment.config.worker;
   if (worker?.kind === "turn-loop" && worker.phases) {
     if (worker.transport !== "app-server") {
@@ -1113,6 +1160,7 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
     });
     await run(buildNetworkAddressCommand(environment, deviceExists)!);
   }
+  await reconcileReadOnlyMounts(environment);
 
   const running = await succeeds({
     executable: incus,
@@ -1154,6 +1202,41 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
   await reconcileServiceWorker(environment);
   await reconcileExposure(environment);
   console.log(`Ready agent environment: ${environment.config.name} (${backend.instance})`);
+}
+
+async function reconcileReadOnlyMounts(environment: ResolvedAgentEnvironment): Promise<void> {
+  const { backend } = environment.config;
+  for (const mount of environment.config.readOnlyMounts ?? []) {
+    const type = await outputText({
+      executable: backend.executable,
+      args: ["config", "device", "get", backend.instance, mount.name, "type"],
+    }).catch(() => "");
+    if (!type) {
+      await run(buildReadOnlyMountAddCommand(environment, mount));
+      continue;
+    }
+    if (type !== "disk") {
+      throw new Error(`Incus device ${mount.name} is ${type}, expected disk`);
+    }
+    for (
+      const [key, desired] of Object.entries({
+        source: mount.source,
+        path: mount.target,
+        readonly: "true",
+      })
+    ) {
+      const actual = await outputText({
+        executable: backend.executable,
+        args: ["config", "device", "get", backend.instance, mount.name, key],
+      });
+      if (actual !== desired) {
+        await run({
+          executable: backend.executable,
+          args: ["config", "device", "set", backend.instance, mount.name, `${key}=${desired}`],
+        });
+      }
+    }
+  }
 }
 
 async function ensureGuestUser(environment: ResolvedAgentEnvironment): Promise<void> {
@@ -1938,6 +2021,7 @@ export async function environmentCommand(args: string[]): Promise<void> {
   else if (action === "force-seed") await seedEnvironment(environment, false, false, true);
   else if (action === "refresh") {
     await seedEnvironment(environment, true);
+    await reconcileReadOnlyMounts(environment);
     await reconcileHostServices(environment, true);
     await reconcileServiceWorker(environment, true);
     await reconcileExposure(environment);
@@ -1958,10 +2042,12 @@ export async function environmentCommand(args: string[]): Promise<void> {
   else if (action === "worker-metrics") await showWorkerMetrics(environment);
   else if (action === "worker-dashboard") await serveWorkerDashboard(environment);
   else if (action === "service-start") {
+    await reconcileReadOnlyMounts(environment);
     await reconcileHostServices(environment);
     await reconcileServiceWorker(environment);
     await reconcileExposure(environment);
   } else if (action === "service-restart") {
+    await reconcileReadOnlyMounts(environment);
     await reconcileHostServices(environment, true);
     await reconcileServiceWorker(environment, true);
     await reconcileExposure(environment);

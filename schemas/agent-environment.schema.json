@@ -25,6 +25,10 @@
       "type": "array",
       "items": { "$ref": "#/$defs/hostService" }
     },
+    "readOnlyMounts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/readOnlyMount" }
+    },
     "worker": {
       "oneOf": [
         { "$ref": "#/$defs/turnLoopWorker" },
@@ -171,6 +175,16 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/nonEmptyString" }
         }
+      }
+    },
+    "readOnlyMount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "source", "target"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$" },
+        "source": { "$ref": "#/$defs/nonEmptyString" },
+        "target": { "$ref": "#/$defs/nonEmptyString" }
       }
     },
     "hostService": {

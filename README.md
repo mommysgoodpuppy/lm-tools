@@ -11,6 +11,7 @@ lm benchmark   replay a captured request and collect timing/VRAM measurements
 lm deploy      validate and run a model deployment
 lm download    download large artifacts with resume and integrity checks
 lm env         manage an isolated declarative agent environment
+lm free-router serve an explicitly zero-priced remote inference pool through OMP
 lm proxy       provide OpenAI-compatible request and stream normalization
 lm vendor      materialize and verify pinned source builds
 ```
@@ -25,6 +26,14 @@ deno run -A /path/to/lm-tools/main.ts env /path/to/project/environment.json --dr
 
 `deploy` and `env` require explicit configuration paths. This keeps the tool independent of any one
 model, machine, network, or workload.
+
+Free remote inference routing is kept behind an authentication-free access-adapter boundary. See
+[`docs/free-router.md`](docs/free-router.md) for the ownership and streaming contract.
+
+OMP is pinned as a source submodule at `vendor/omp` and supplies the initial account broker and
+streaming access gateway. lm-tools does not implement provider login flows. After initializing
+submodules, `deno task omp:check` verifies that the reviewed source and installed OMP executable
+match `vendor/omp.version`.
 
 ## Base runtime configuration
 

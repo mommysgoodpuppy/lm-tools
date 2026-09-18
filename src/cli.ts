@@ -4,6 +4,7 @@ import { downloadCommand, downloadUsage } from "./download.ts";
 import { deployCommand, deployUsage } from "./deployment.ts";
 import { environmentCommand, environmentUsage } from "./agent_environment.ts";
 import { llamaCommand, llamaUsage } from "./llama.ts";
+import { freeRouterCommand, freeRouterUsage } from "./free_router_server.ts";
 import { proxyCommand, proxyUsage } from "./proxy.ts";
 import { vendorCommand, vendorUsage } from "./vendor.ts";
 
@@ -20,6 +21,7 @@ Commands:
   download  Resumable parallel download for large model files
   deploy    Validate and run a declarative model deployment
   env       Manage a declarative isolated agent environment
+  free-router  Serve an explicitly zero-priced remote inference pool
   kill-everything  Stop all configured model services and inference processes
   llama     Launch llama-server with useful local defaults
   proxy     Adapt OpenAI-compatible traffic for clients such as VS Code
@@ -49,6 +51,9 @@ export async function main(args: string[]): Promise<void> {
     case "kill-everything":
       await killEverythingCommand(commandArgs);
       return;
+    case "free-router":
+      await freeRouterCommand(commandArgs);
+      return;
     case "llama":
     case "serve":
       await llamaCommand(commandArgs);
@@ -72,6 +77,8 @@ export async function main(args: string[]): Promise<void> {
           ? environmentUsage()
           : topic === "kill-everything"
           ? killEverythingUsage()
+          : topic === "free-router"
+          ? freeRouterUsage()
           : topic === "llama" || topic === "serve"
           ? llamaUsage()
           : topic === "proxy"

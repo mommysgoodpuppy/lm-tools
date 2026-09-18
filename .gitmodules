@@ -2,3 +2,6 @@
 	path = vendor/t3code
 	url = https://github.com/mommysgoodpuppy/t3code.git
 	branch = lm-tools-campaign-observer
+[submodule "vendor/omp"]
+	path = vendor/omp
+	url = https://github.com/can1357/oh-my-pi.git
