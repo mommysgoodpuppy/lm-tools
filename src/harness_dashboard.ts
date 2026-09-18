@@ -134,10 +134,10 @@ async function serviceStates(
   );
 }
 
-export async function serveWorkerDashboard(environment: ResolvedAgentEnvironment): Promise<never> {
-  const worker = environment.config.worker;
-  if (!worker || worker.kind !== "turn-loop") {
-    throw new Error("The worker dashboard requires a turn-loop worker");
+export async function serveHarnessDashboard(environment: ResolvedAgentEnvironment): Promise<never> {
+  const harness = environment.config.harness;
+  if (!harness || harness.kind !== "turn-loop") {
+    throw new Error("The harness dashboard requires a turn-loop harness");
   }
   const handler = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
@@ -146,14 +146,14 @@ export async function serveWorkerDashboard(environment: ResolvedAgentEnvironment
       "cache-control": "no-store",
     };
     if (url.pathname === "/api/status") {
-      const campaign = await readJson(join(worker.metricsDirectory, "campaign.json"));
-      const current = await readJson(join(worker.metricsDirectory, "current.json"));
+      const campaign = await readJson(join(harness.metricsDirectory, "campaign.json"));
+      const current = await readJson(join(harness.metricsDirectory, "current.json"));
       const eventLog = typeof current?.eventLog === "string" ? current.eventLog : undefined;
       const tail = await recentEvents(eventLog);
       let objective: string | null = null;
       try {
         objective = await Deno.readTextFile(
-          worker.prompt,
+          harness.prompt,
         );
       } catch {
         // The activity and ledger remain useful if the source checkout moves.
@@ -185,7 +185,7 @@ export async function serveWorkerDashboard(environment: ResolvedAgentEnvironment
     }
     return new Response("Not found", { status: 404, headers });
   };
-  console.log(`Agent observer API: http://127.0.0.1:${worker.dashboardPort}/api/status`);
-  Deno.serve({ hostname: "127.0.0.1", port: worker.dashboardPort }, handler);
+  console.log(`Agent observer API: http://127.0.0.1:${harness.dashboardPort}/api/status`);
+  Deno.serve({ hostname: "127.0.0.1", port: harness.dashboardPort }, handler);
   return await new Promise<never>(() => {});
 }

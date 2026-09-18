@@ -2,11 +2,13 @@ import { assertEquals } from "jsr:@std/assert@1/equals";
 import { assertThrows } from "jsr:@std/assert@1";
 import {
   compactTurnTranscript,
+  OmpRpcFrameDecoder,
   parseCodexEventUsage,
+  parseOmpRpcEvents,
   parsePiRpcEvents,
   parseTurnResearchSummary,
-  validateWorkerPhaseRequest,
-} from "./agent_worker.ts";
+  validateAttemptPhaseRequest,
+} from "./harness_attempt.ts";
 
 Deno.test("parses a fenced structured turn research summary", () => {
   const parsed = parseTurnResearchSummary(
@@ -46,7 +48,7 @@ Deno.test("compacts only durable high-signal turn events", () => {
 Deno.test("validates model-directed phase transitions", () => {
   const phases = ["discovery", "implementation", "verification", "handoff"];
   assertEquals(
-    validateWorkerPhaseRequest({
+    validateAttemptPhaseRequest({
       version: 1,
       next: "discovery",
       reason: "new evidence",
@@ -54,9 +56,9 @@ Deno.test("validates model-directed phase transitions", () => {
     { version: 1, next: "discovery", reason: "new evidence" },
   );
   assertThrows(
-    () => validateWorkerPhaseRequest({ version: 1, next: "unknown" }, phases),
+    () => validateAttemptPhaseRequest({ version: 1, next: "unknown" }, phases),
     Error,
-    "Invalid requested worker phase",
+    "Invalid requested harness phase",
   );
 });
 
@@ -124,6 +126,133 @@ Deno.test("parses Pi RPC stats, compactions, and final text", () => {
   assertEquals(parsed.compactions, 1);
   assertEquals(parsed.semanticCompactions, 0);
   assertEquals(parsed.compactionReminders, 0);
+});
+
+Deno.test("parses OMP RPC stats, compactions, and final text", () => {
+  const parsed = parseOmpRpcEvents([
+    JSON.stringify({ type: "agent_start" }),
+    JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "fallback" }],
+        usage: { input: 10, output: 4, cacheRead: 6, totalTokens: 14 },
+      },
+    }),
+    JSON.stringify({
+      type: "auto_compaction_end",
+      aborted: false,
+      result: { summary: "state" },
+    }),
+    JSON.stringify({
+      type: "auto_compaction_end",
+      aborted: true,
+      result: null,
+    }),
+    JSON.stringify({
+      id: "lm-tools-stats",
+      type: "response",
+      command: "get_session_stats",
+      success: true,
+      data: {
+        tokens: {
+          input: 2400,
+          output: 450,
+          reasoning: 90,
+          cacheRead: 1800,
+          cacheWrite: 0,
+          total: 2850,
+        },
+      },
+    }),
+    JSON.stringify({
+      id: "lm-tools-final",
+      type: "response",
+      command: "get_last_assistant_text",
+      success: true,
+      data: { text: "OMP session complete" },
+    }),
+    JSON.stringify({ type: "agent_end", messages: [], isTerminal: true }),
+  ]);
+  assertEquals(parsed.usage, {
+    inputTokens: 2400,
+    cachedInputTokens: 1800,
+    outputTokens: 450,
+    totalTokens: 2850,
+  });
+  assertEquals(parsed.finalMessage, "OMP session complete");
+  assertEquals(parsed.compactions, 1);
+  assertEquals(parsed.semanticCompactions, 0);
+  assertEquals(parsed.compactionReminders, 0);
+});
+
+Deno.test("falls back to OMP message usage when session stats are absent", () => {
+  const parsed = parseOmpRpcEvents([
+    JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "fallback only" }],
+        usage: { input: 10, output: 4, cacheRead: 6, totalTokens: 20 },
+      },
+    }),
+  ]);
+  assertEquals(parsed.usage.totalTokens, 20);
+  assertEquals(parsed.finalMessage, "fallback only");
+});
+
+Deno.test("reassembles OMP protocol v2 chunk sequences in order", () => {
+  const payload = JSON.stringify({
+    type: "response",
+    command: "get_session_stats",
+    success: true,
+    data: { tokens: { input: 1, output: 2, cacheRead: 0, total: 3 } },
+  });
+  const bytes = new TextEncoder().encode(payload);
+  const b64 = (part: Uint8Array) => btoa(String.fromCharCode(...part));
+  const decoder = new OmpRpcFrameDecoder();
+  const first = decoder.decode({
+    type: "rpc_chunk",
+    chunkId: "rpc-1",
+    index: 0,
+    count: 2,
+    byteLength: bytes.length,
+    data: b64(bytes.slice(0, 5)),
+  });
+  assertEquals(first, null);
+  const second = decoder.decode({
+    type: "rpc_chunk",
+    chunkId: "rpc-1",
+    index: 1,
+    count: 2,
+    byteLength: bytes.length,
+    data: b64(bytes.slice(5)),
+  });
+  assertEquals(second, payload);
+});
+
+Deno.test("rejects OMP chunk sequences that are incomplete or out of order", () => {
+  const decoder = new OmpRpcFrameDecoder();
+  assertThrows(() =>
+    decoder.decode({
+      type: "rpc_chunk",
+      chunkId: "rpc-1",
+      index: 2,
+      count: 3,
+      byteLength: 12,
+      data: btoa("abc"),
+    })
+  );
+  assertThrows(() =>
+    decoder.decode({
+      type: "rpc_chunk",
+      chunkId: "rpc-2",
+      index: 0,
+      count: 0,
+      byteLength: 3,
+      data: btoa("abc"),
+    })
+  );
 });
 
 Deno.test("parses app-server usage and final summary", () => {

@@ -3,16 +3,17 @@ import { basename, dirname, resolve } from "jsr:@std/path@1";
 import { loadDeployment, type ResolvedDeployment } from "./deployment.ts";
 import { assertFile, shellQuote } from "./llama.ts";
 import { proxyCommand } from "./proxy.ts";
-import { serveWorkerDashboard } from "./agent_dashboard.ts";
-import { runWorkerLoop, runWorkerOnce } from "./agent_worker.ts";
+import { serveHarnessDashboard } from "./harness_dashboard.ts";
+import { runAttemptLoop, runAttemptOnce } from "./harness_attempt.ts";
 
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 const ENVIRONMENT_SCHEMA = `${PROJECT_ROOT}/schemas/agent-environment.schema.json`;
 
-export interface TurnLoopWorker {
+export interface AttemptHarness {
   kind: "turn-loop";
-  transport: "exec-json" | "app-server" | "pi-rpc";
+  adapter: "exec-json" | "app-server" | "pi-rpc" | "omp-rpc";
   command?: string[];
+  model?: string;
   prompt: string;
   state: string;
   metricsDirectory: string;
@@ -52,7 +53,7 @@ export interface TurnLoopWorker {
   cleanupProcesses: string[];
 }
 
-export interface ServiceWorker {
+export interface ServiceHarness {
   kind: "service";
   command: string[];
   environment?: Record<string, string>;
@@ -71,7 +72,7 @@ export interface ServiceWorker {
   restartPreventExitStatuses: number[];
   ready: { command: string[]; timeoutSeconds: number };
   restartOnRefresh: boolean;
-  transport?: never;
+  adapter?: never;
   prompt?: never;
   state?: never;
   metricsDirectory?: never;
@@ -132,7 +133,7 @@ export interface AgentEnvironmentConfig {
     source: string;
     target: string;
   }>;
-  worker?: TurnLoopWorker | ServiceWorker;
+  harness?: AttemptHarness | ServiceHarness;
   exposure?: {
     services: Array<{
       name: string;
@@ -154,7 +155,7 @@ export interface AgentEnvironmentConfig {
 export interface ResolvedAgentEnvironment {
   sourcePath: string;
   config: AgentEnvironmentConfig;
-  model: ResolvedDeployment;
+  model: ResolvedDeployment | null;
 }
 
 export interface CommandSpec {
@@ -189,13 +190,13 @@ Actions:
   --force-seed  Explicitly overwrite every declared seed, including create/manual state
   --refresh   Refresh declared control files and host services; preserve guest workspace edits
   --model-proxy  Expose the host model only on the declared Incus bridge address
-  --worker-once  Run one fresh, bounded agent turn and record campaign metrics
-  --worker-loop  Continuously run fresh turns with the declared cooldown
-  --worker-metrics  Print the cumulative campaign ledger
-  --worker-dashboard  Serve the live human-overview UI on localhost
-  --service-start  Reconcile and start a declared service worker and its exposure
-  --service-restart  Refresh secrets/configuration and restart a declared service worker
-  --service-stop  Stop a declared service worker and remove its Tailscale Serve route
+  --attempt-once  Run one fresh, bounded agent turn and record campaign metrics
+  --attempt-loop  Continuously run fresh turns with the declared cooldown
+  --attempt-metrics  Print the cumulative campaign ledger
+  --attempt-dashboard  Serve the live human-overview UI on localhost
+  --service-start  Reconcile and start a declared service harness and its exposure
+  --service-restart  Refresh secrets/configuration and restart a declared service harness
+  --service-stop  Stop a declared service harness and remove its Tailscale Serve route
   --status    Show the instance and its configured devices
   --exec      Run COMMAND as the declared guest user in its workspace
   --help      Show this help`;
@@ -227,11 +228,11 @@ export async function loadAgentEnvironment(path: string): Promise<ResolvedAgentE
 }
 
 function modelEndpoint(environment: ResolvedAgentEnvironment): { host: string; port: number } {
-  const config = environment.model.config;
-  if (config.backend.kind !== "llama.cpp") {
+  const model = environment.model;
+  if (!model || model.config.backend.kind !== "llama.cpp") {
     throw new Error("Agent environments currently require a llama.cpp model deployment");
   }
-  return environment.model.proxy?.listen ?? config.backend.listen;
+  return model.proxy?.listen ?? model.config.backend.listen;
 }
 
 export function buildNetworkAddressCommand(
@@ -444,15 +445,15 @@ async function readSecretSource(
 }
 
 function serviceInputGroups(
-  worker: ServiceWorker,
+  harness: ServiceHarness,
   hostServices: NonNullable<AgentEnvironmentConfig["hostServices"]> = [],
 ): Map<string, string[]> {
   const groups = new Map<string, string[]>();
   const hostInputs = hostServices.flatMap((service) => service.environmentInputs ?? []);
   for (
     const input of [
-      ...(worker.environmentInputs ?? []),
-      ...(worker.secretInputs ?? []),
+      ...(harness.environmentInputs ?? []),
+      ...(harness.secretInputs ?? []),
       ...hostInputs,
     ]
   ) {
@@ -467,21 +468,21 @@ function serviceInputGroups(
 }
 
 async function readServiceInputs(
-  worker: ServiceWorker,
+  harness: ServiceHarness,
   hostServices: NonNullable<AgentEnvironmentConfig["hostServices"]> = [],
 ): Promise<Map<string, Record<string, string>>> {
   const values = new Map<string, Record<string, string>>();
-  for (const [source, keys] of serviceInputGroups(worker, hostServices)) {
+  for (const [source, keys] of serviceInputGroups(harness, hostServices)) {
     values.set(source, await readSecretSource(source, keys));
   }
   return values;
 }
 
 function serviceEnvironmentInputs(
-  worker: ServiceWorker,
+  harness: ServiceHarness,
   inputs: Map<string, Record<string, string>>,
 ): Record<string, string> {
-  return Object.fromEntries((worker.environmentInputs ?? []).map((input) => [
+  return Object.fromEntries((harness.environmentInputs ?? []).map((input) => [
     input.key,
     inputs.get(input.source)?.[input.key] ??
       (() => {
@@ -1008,54 +1009,54 @@ async function validateEnvironment(
     if (mountNames.has(mount.name)) throw new Error(`Duplicate read-only mount: ${mount.name}`);
     mountNames.add(mount.name);
   }
-  const worker = environment.config.worker;
-  if (worker?.kind === "turn-loop" && worker.phases) {
-    if (worker.transport !== "app-server") {
-      throw new Error("Phased workers currently require transport=app-server");
+  const harness = environment.config.harness;
+  if (harness?.kind === "turn-loop" && harness.phases) {
+    if (harness.adapter !== "app-server") {
+      throw new Error("Phased harnesses currently require adapter=app-server");
     }
-    const names = worker.phases.map((phase) => phase.name);
-    if (new Set(names).size !== names.length) throw new Error("Worker phase names must be unique");
-    for (const phase of worker.phases) {
+    const names = harness.phases.map((phase) => phase.name);
+    if (new Set(names).size !== names.length) throw new Error("Attempt phase names must be unique");
+    for (const phase of harness.phases) {
       if (!phase.prompt.startsWith("/")) {
-        throw new Error(`Worker phase prompt must be absolute: ${phase.prompt}`);
+        throw new Error(`Attempt phase prompt must be absolute: ${phase.prompt}`);
       }
       if (phase.wrapUpSeconds >= phase.timeoutSeconds) {
-        throw new Error(`Worker phase ${phase.name} wrap-up must precede its timeout`);
+        throw new Error(`Attempt phase ${phase.name} wrap-up must precede its timeout`);
       }
       for (const path of phase.requiredChangedFiles) {
         if (!path.startsWith("/")) {
-          throw new Error(`Worker phase required file must be absolute: ${path}`);
+          throw new Error(`Attempt phase required file must be absolute: ${path}`);
         }
       }
     }
-    if (worker.phaseControl) {
-      if (!worker.phaseControl.requestPath.startsWith("/")) {
-        throw new Error("Worker phase-control requestPath must be absolute");
+    if (harness.phaseControl) {
+      if (!harness.phaseControl.requestPath.startsWith("/")) {
+        throw new Error("Attempt phase-control requestPath must be absolute");
       }
-      if (!names.includes(worker.phaseControl.finalPhase)) {
-        throw new Error(`Unknown worker final phase: ${worker.phaseControl.finalPhase}`);
+      if (!names.includes(harness.phaseControl.finalPhase)) {
+        throw new Error(`Unknown harness final phase: ${harness.phaseControl.finalPhase}`);
       }
     }
-  } else if (worker?.kind === "turn-loop" && worker.phaseControl) {
-    throw new Error("Worker phaseControl requires phases");
+  } else if (harness?.kind === "turn-loop" && harness.phaseControl) {
+    throw new Error("Attempt phaseControl requires phases");
   }
-  if (worker?.kind === "service") {
-    for (const command of [worker.command, worker.ready.command]) {
+  if (harness?.kind === "service") {
+    for (const command of [harness.command, harness.ready.command]) {
       if (!command[0].startsWith("/")) {
         throw new Error(`Service command executable must be absolute: ${command[0]}`);
       }
     }
     const environmentInputKeys = new Set<string>();
-    for (const input of worker.environmentInputs ?? []) {
+    for (const input of harness.environmentInputs ?? []) {
       if (
-        environmentInputKeys.has(input.key) || Object.hasOwn(worker.environment ?? {}, input.key)
+        environmentInputKeys.has(input.key) || Object.hasOwn(harness.environment ?? {}, input.key)
       ) {
         throw new Error(`Duplicate service environment key: ${input.key}`);
       }
       environmentInputKeys.add(input.key);
     }
     const secretTargets = new Set<string>();
-    for (const input of worker.secretInputs ?? []) {
+    for (const input of harness.secretInputs ?? []) {
       if (!input.target.startsWith("/")) {
         throw new Error(`Secret input target must be absolute: ${input.target}`);
       }
@@ -1076,10 +1077,10 @@ async function validateEnvironment(
       secretTargets.add(input.target);
     }
     if (requireSecrets) {
-      await readServiceInputs(worker, environment.config.hostServices);
+      await readServiceInputs(harness, environment.config.hostServices);
     }
     const setupNames = new Set<string>();
-    for (const step of worker.setup ?? []) {
+    for (const step of harness.setup ?? []) {
       if (setupNames.has(step.name)) throw new Error(`Duplicate service setup step: ${step.name}`);
       setupNames.add(step.name);
       for (const command of [step.check, step.command]) {
@@ -1199,7 +1200,7 @@ async function applyEnvironment(environment: ResolvedAgentEnvironment): Promise<
     await seedEnvironment(environment, false, !created);
   }
   await reconcileHostServices(environment);
-  await reconcileServiceWorker(environment);
+  await reconcileServiceHarness(environment);
   await reconcileExposure(environment);
   console.log(`Ready agent environment: ${environment.config.name} (${backend.instance})`);
 }
@@ -1430,7 +1431,7 @@ function jsonPointer(value: unknown, pointer: string): unknown {
 
 async function serviceSetupReady(
   environment: ResolvedAgentEnvironment,
-  step: NonNullable<ServiceWorker["setup"]>[number],
+  step: NonNullable<ServiceHarness["setup"]>[number],
   serviceEnvironment: Record<string, string> = {},
 ): Promise<boolean> {
   const command = guestServiceCommand(environment, serviceEnvironment, step.check);
@@ -1447,27 +1448,27 @@ async function serviceSetupReady(
 
 export function buildServiceUnit(
   environment: ResolvedAgentEnvironment,
-  worker: ServiceWorker,
+  harness: ServiceHarness,
   inputEnvironment: Record<string, string> = {},
 ): string {
   const systemdQuote = (value: string) => JSON.stringify(value.replaceAll("%", "%%"));
-  const environmentLines = Object.entries({ ...worker.environment, ...inputEnvironment }).map((
+  const environmentLines = Object.entries({ ...harness.environment, ...inputEnvironment }).map((
     [key, value],
   ) => `Environment=${systemdQuote(`${key}=${value}`)}`);
   return [
     "[Unit]",
-    `Description=lm-tools service worker for ${environment.config.name}`,
+    `Description=lm-tools service harness for ${environment.config.name}`,
     "After=network-online.target",
     "Wants=network-online.target",
     "",
     "[Service]",
     "Type=simple",
     `WorkingDirectory=${environment.config.guest.workspace}`,
-    `ExecStart=${worker.command.map(systemdQuote).join(" ")}`,
+    `ExecStart=${harness.command.map(systemdQuote).join(" ")}`,
     ...environmentLines,
-    `Restart=${worker.restart}`,
-    `RestartSec=${worker.restartSeconds}`,
-    `RestartPreventExitStatus=${worker.restartPreventExitStatuses.join(" ")}`,
+    `Restart=${harness.restart}`,
+    `RestartSec=${harness.restartSeconds}`,
+    `RestartPreventExitStatus=${harness.restartPreventExitStatuses.join(" ")}`,
     "KillMode=control-group",
     "OOMPolicy=continue",
     "TimeoutStartSec=120",
@@ -1493,10 +1494,10 @@ function guestServiceCommand(
 
 async function importServiceSecrets(
   environment: ResolvedAgentEnvironment,
-  worker: ServiceWorker,
+  harness: ServiceHarness,
   sourceValues: Map<string, Record<string, string>>,
 ): Promise<void> {
-  for (const input of worker.secretInputs ?? []) {
+  for (const input of harness.secretInputs ?? []) {
     const value = sourceValues.get(input.source)?.[input.key];
     if (value === undefined) throw new Error(`Missing protected service input ${input.key}`);
     console.log(`Importing protected secret ${input.key}: present`);
@@ -1520,24 +1521,24 @@ async function importServiceSecrets(
   }
 }
 
-async function reconcileServiceWorker(
+async function reconcileServiceHarness(
   environment: ResolvedAgentEnvironment,
   refresh = false,
 ): Promise<void> {
-  const worker = environment.config.worker;
-  if (!worker || worker.kind !== "service") return;
+  const harness = environment.config.harness;
+  if (!harness || harness.kind !== "service") return;
   const { guest } = environment.config;
   await run(
     guestUserCommand(environment, ["mkdir", "-p", `${guest.home}/.config/systemd/user`]),
     false,
   );
-  const inputValues = await readServiceInputs(worker, environment.config.hostServices);
+  const inputValues = await readServiceInputs(harness, environment.config.hostServices);
   const inputEnvironment = {
-    ...worker.environment,
-    ...serviceEnvironmentInputs(worker, inputValues),
+    ...harness.environment,
+    ...serviceEnvironmentInputs(harness, inputValues),
   };
-  await importServiceSecrets(environment, worker, inputValues);
-  for (const step of worker.setup ?? []) {
+  await importServiceSecrets(environment, harness, inputValues);
+  for (const step of harness.setup ?? []) {
     if (step.registryIntegrity) {
       await verifyRegistryIntegrity(environment, step.registryIntegrity, true);
     }
@@ -1548,11 +1549,11 @@ async function reconcileServiceWorker(
       throw new Error(`Service setup check still fails after ${step.name}`);
     }
   }
-  const unitPath = `${guest.home}/.config/systemd/user/${worker.unit}`;
+  const unitPath = `${guest.home}/.config/systemd/user/${harness.unit}`;
   await writeGuestFile(
     environment,
     unitPath,
-    buildServiceUnit(environment, worker, inputEnvironment),
+    buildServiceUnit(environment, harness, inputEnvironment),
     true,
   );
   await run(guestUserCommand(environment, ["systemctl", "--user", "daemon-reload"]), false);
@@ -1562,24 +1563,24 @@ async function reconcileServiceWorker(
       "--user",
       "enable",
       "--now",
-      worker.unit,
+      harness.unit,
     ]),
     false,
   );
-  if (refresh && worker.restartOnRefresh) {
+  if (refresh && harness.restartOnRefresh) {
     await run(
-      guestUserCommand(environment, ["systemctl", "--user", "restart", worker.unit]),
+      guestUserCommand(environment, ["systemctl", "--user", "restart", harness.unit]),
       false,
     );
   }
-  const deadline = performance.now() + worker.ready.timeoutSeconds * 1000;
+  const deadline = performance.now() + harness.ready.timeoutSeconds * 1000;
   while (performance.now() < deadline) {
-    if (await succeeds(guestServiceCommand(environment, inputEnvironment, worker.ready.command))) {
+    if (await succeeds(guestServiceCommand(environment, inputEnvironment, harness.ready.command))) {
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`Service worker ${worker.unit} did not become ready`);
+  throw new Error(`Service harness ${harness.unit} did not become ready`);
 }
 
 async function reconcileExposure(environment: ResolvedAgentEnvironment): Promise<void> {
@@ -1646,12 +1647,12 @@ async function reconcileExposure(environment: ResolvedAgentEnvironment): Promise
   }
 }
 
-async function stopServiceWorker(environment: ResolvedAgentEnvironment): Promise<void> {
-  const worker = environment.config.worker;
-  if (!worker || worker.kind !== "service") {
-    throw new Error("This action requires a service worker");
+async function stopServiceHarness(environment: ResolvedAgentEnvironment): Promise<void> {
+  const harness = environment.config.harness;
+  if (!harness || harness.kind !== "service") {
+    throw new Error("This action requires a service harness");
   }
-  await run(guestUserCommand(environment, ["systemctl", "--user", "stop", worker.unit]), false);
+  await run(guestUserCommand(environment, ["systemctl", "--user", "stop", harness.unit]), false);
   for (const service of environment.config.hostServices ?? []) {
     const unit = basename(service.source);
     if (unit.endsWith(".target")) {
@@ -1681,7 +1682,9 @@ async function provisionEnvironment(environment: ResolvedAgentEnvironment): Prom
 }
 
 async function serveModelProxy(environment: ResolvedAgentEnvironment): Promise<void> {
-  const modelBackend = environment.model.config.backend;
+  const model = environment.model;
+  if (!model) throw new Error("The model proxy requires a declared model deployment");
+  const modelBackend = model.config.backend;
   if (modelBackend.kind !== "llama.cpp") {
     throw new Error("Agent model proxy currently requires a llama.cpp backend");
   }
@@ -1694,7 +1697,7 @@ async function serveModelProxy(environment: ResolvedAgentEnvironment): Promise<v
     "--upstream",
     `http://${modelBackend.listen.host}:${modelBackend.listen.port}`,
     "--context-limit",
-    String(environment.model.config.runtime.contextWindow),
+    String(model.config.runtime.contextWindow),
   ]);
 }
 
@@ -1830,12 +1833,12 @@ async function showStatus(environment: ResolvedAgentEnvironment): Promise<void> 
     executable: backend.executable,
     args: ["config", "device", "show", backend.instance],
   });
-  const worker = environment.config.worker;
-  if (worker?.kind === "service") {
+  const harness = environment.config.harness;
+  if (harness?.kind === "service") {
     const state = await outputText(
-      guestUserCommand(environment, ["systemctl", "--user", "is-active", worker.unit]),
+      guestUserCommand(environment, ["systemctl", "--user", "is-active", harness.unit]),
     ).catch(() => "inactive");
-    console.log(`Guest service ${worker.unit}: ${state}`);
+    console.log(`Guest service ${harness.unit}: ${state}`);
     for (const service of environment.config.exposure?.services ?? []) {
       if (service.tailscaleServe) {
         await run({
@@ -1848,17 +1851,17 @@ async function showStatus(environment: ResolvedAgentEnvironment): Promise<void> 
   }
 }
 
-async function showWorkerMetrics(environment: ResolvedAgentEnvironment): Promise<void> {
-  const worker = environment.config.worker;
-  if (!worker || worker.kind !== "turn-loop") {
-    throw new Error("Worker metrics require a turn-loop worker");
+async function showAttemptMetrics(environment: ResolvedAgentEnvironment): Promise<void> {
+  const harness = environment.config.harness;
+  if (!harness || harness.kind !== "turn-loop") {
+    throw new Error("Attempt metrics require a turn-loop harness");
   }
-  const path = `${worker.metricsDirectory}/campaign.json`;
+  const path = `${harness.metricsDirectory}/campaign.json`;
   try {
     console.log(await Deno.readTextFile(path));
   } catch (error) {
     if (error instanceof Deno.errors.NotFound) {
-      console.log(`No worker campaign has been recorded yet: ${path}`);
+      console.log(`No harness campaign has been recorded yet: ${path}`);
       return;
     }
     throw error;
@@ -1908,10 +1911,10 @@ export async function environmentCommand(args: string[]): Promise<void> {
     | "force-seed"
     | "refresh"
     | "model-proxy"
-    | "worker-once"
-    | "worker-loop"
-    | "worker-metrics"
-    | "worker-dashboard"
+    | "attempt-once"
+    | "attempt-loop"
+    | "attempt-metrics"
+    | "attempt-dashboard"
     | "service-start"
     | "service-restart"
     | "service-stop"
@@ -1931,10 +1934,10 @@ export async function environmentCommand(args: string[]): Promise<void> {
     else if (arg === "--force-seed") setAction("force-seed");
     else if (arg === "--refresh") setAction("refresh");
     else if (arg === "--model-proxy") setAction("model-proxy");
-    else if (arg === "--worker-once") setAction("worker-once");
-    else if (arg === "--worker-loop") setAction("worker-loop");
-    else if (arg === "--worker-metrics") setAction("worker-metrics");
-    else if (arg === "--worker-dashboard") setAction("worker-dashboard");
+    else if (arg === "--attempt-once") setAction("attempt-once");
+    else if (arg === "--attempt-loop") setAction("attempt-loop");
+    else if (arg === "--attempt-metrics") setAction("attempt-metrics");
+    else if (arg === "--attempt-dashboard") setAction("attempt-dashboard");
     else if (arg === "--service-start") setAction("service-start");
     else if (arg === "--service-restart") setAction("service-restart");
     else if (arg === "--service-stop") setAction("service-stop");
@@ -1952,6 +1955,31 @@ export async function environmentCommand(args: string[]): Promise<void> {
   }
 
   const environment = await loadAgentEnvironment(path);
+  await runEnvironmentAction(environment, action, execArgs);
+}
+
+export async function runEnvironmentAction(
+  environment: ResolvedAgentEnvironment,
+  action:
+    | "check"
+    | "dry-run"
+    | "apply"
+    | "provision"
+    | "seed"
+    | "force-seed"
+    | "refresh"
+    | "model-proxy"
+    | "attempt-once"
+    | "attempt-loop"
+    | "attempt-metrics"
+    | "attempt-dashboard"
+    | "service-start"
+    | "service-restart"
+    | "service-stop"
+    | "status"
+    | "exec",
+  execArgs: string[] = [],
+): Promise<void> {
   await validateEnvironment(
     environment,
     ["check", "apply", "refresh", "service-start", "service-restart"].includes(action),
@@ -1961,7 +1989,9 @@ export async function environmentCommand(args: string[]): Promise<void> {
   } else if (action === "dry-run") {
     console.log(`Environment: ${environment.config.name}`);
     console.log(`Instance:    ${environment.config.backend.instance}`);
-    console.log(`Model:       ${environment.model.config.name}`);
+    console.log(
+      `Model:       ${environment.model?.config.name ?? "(none — remote inference only)"}`,
+    );
     console.log(
       `Model API:   http://${environment.config.backend.modelAccess.host}:${environment.config.backend.modelAccess.port}/v1`,
     );
@@ -1991,12 +2021,12 @@ export async function environmentCommand(args: string[]): Promise<void> {
     for (const command of buildHostServiceCommands(environment)) {
       console.log(formatCommand(command));
     }
-    const worker = environment.config.worker;
-    if (worker?.kind === "service") {
-      for (const input of worker.secretInputs ?? []) {
+    const harness = environment.config.harness;
+    if (harness?.kind === "service") {
+      for (const input of harness.secretInputs ?? []) {
         console.log(`write guest secret file ${input.target} mode=0600 < [REDACTED:${input.key}]`);
       }
-      for (const step of worker.setup ?? []) {
+      for (const step of harness.setup ?? []) {
         if (step.registryIntegrity) {
           console.log(
             `verify npm integrity ${step.registryIntegrity.package}@${step.registryIntegrity.version}: ${step.registryIntegrity.integrity}`,
@@ -2008,7 +2038,7 @@ export async function environmentCommand(args: string[]): Promise<void> {
         }
         console.log(formatCommand(guestUserCommand(environment, step.command)));
       }
-      console.log(`write guest systemd user unit: ${worker.unit}`);
+      console.log(`write guest systemd user unit: ${harness.unit}`);
     }
     for (const command of buildExposureCommands(environment)) console.log(formatCommand(command));
   } else if (action === "apply") await applyEnvironment(environment);
@@ -2023,13 +2053,16 @@ export async function environmentCommand(args: string[]): Promise<void> {
     await seedEnvironment(environment, true);
     await reconcileReadOnlyMounts(environment);
     await reconcileHostServices(environment, true);
-    await reconcileServiceWorker(environment, true);
+    await reconcileServiceHarness(environment, true);
     await reconcileExposure(environment);
   } else if (action === "model-proxy") await serveModelProxy(environment);
-  else if (action === "worker-once") {
-    const { run, ledger } = await runWorkerOnce(environment);
+  else if (action === "attempt-once") {
+    if (!environment.model) {
+      throw new Error("Attempt actions require a declared model deployment");
+    }
+    const { run, ledger } = await runAttemptOnce(environment);
     console.log(
-      `Worker ${run.id}: exit=${run.exitCode}, ${run.durationSeconds.toFixed(1)}s, ` +
+      `Attempt ${run.id}: exit=${run.exitCode}, ${run.durationSeconds.toFixed(1)}s, ` +
         `${run.usage.totalTokens.toLocaleString("en-US")} tokens`,
     );
     console.log(
@@ -2037,21 +2070,21 @@ export async function environmentCommand(args: string[]): Promise<void> {
         `${ledger.usage.totalTokens.toLocaleString("en-US")} tokens`,
     );
     if (run.finalMessage) console.log(run.finalMessage.trim());
-    if (run.exitCode !== 0) throw new Error(`Worker exited with status ${run.exitCode}`);
-  } else if (action === "worker-loop") await runWorkerLoop(environment);
-  else if (action === "worker-metrics") await showWorkerMetrics(environment);
-  else if (action === "worker-dashboard") await serveWorkerDashboard(environment);
+    if (run.exitCode !== 0) throw new Error(`Attempt harness exited with status ${run.exitCode}`);
+  } else if (action === "attempt-loop") await runAttemptLoop(environment);
+  else if (action === "attempt-metrics") await showAttemptMetrics(environment);
+  else if (action === "attempt-dashboard") await serveHarnessDashboard(environment);
   else if (action === "service-start") {
     await reconcileReadOnlyMounts(environment);
     await reconcileHostServices(environment);
-    await reconcileServiceWorker(environment);
+    await reconcileServiceHarness(environment);
     await reconcileExposure(environment);
   } else if (action === "service-restart") {
     await reconcileReadOnlyMounts(environment);
     await reconcileHostServices(environment, true);
-    await reconcileServiceWorker(environment, true);
+    await reconcileServiceHarness(environment, true);
     await reconcileExposure(environment);
-  } else if (action === "service-stop") await stopServiceWorker(environment);
+  } else if (action === "service-stop") await stopServiceHarness(environment);
   else if (action === "status") await showStatus(environment);
   else await execEnvironment(environment, execArgs);
 }

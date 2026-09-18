@@ -1,5 +1,5 @@
 import { dirname, join } from "jsr:@std/path@1";
-import type { ResolvedAgentEnvironment, TurnLoopWorker } from "./agent_environment.ts";
+import type { AttemptHarness, ResolvedAgentEnvironment } from "./agent_environment.ts";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -13,7 +13,7 @@ interface RepositorySnapshot {
   status: string;
 }
 
-interface WorkerRun {
+interface AttemptRun {
   id: string;
   startedAt: string;
   finishedAt: string;
@@ -31,7 +31,7 @@ interface WorkerRun {
   repositoriesAfter: Record<string, RepositorySnapshot>;
   finalMessage: string | null;
   summary?: TurnResearchSummary;
-  phases?: WorkerPhaseRun[];
+  phases?: AttemptPhaseRun[];
 }
 
 export interface TurnResearchSummary {
@@ -55,7 +55,7 @@ interface TurnSummaryLedger {
   entries: TurnResearchSummary[];
 }
 
-interface WorkerPhaseRun {
+interface AttemptPhaseRun {
   name: string;
   startedAt: string;
   finishedAt: string;
@@ -80,7 +80,7 @@ interface CampaignLedger {
   compactions: number;
   semanticCompactions: number;
   compactionReminders: number;
-  history: WorkerRun[];
+  history: AttemptRun[];
 }
 
 const ZERO_USAGE: TokenUsage = {
@@ -332,7 +332,7 @@ async function handleServerRequest(
   }
   await writeRpc(writer, {
     id: message.id,
-    error: { code: -32601, message: `Unsupported autonomous worker request: ${message.method}` },
+    error: { code: -32601, message: `Unsupported autonomous harness request: ${message.method}` },
   });
 }
 
@@ -342,16 +342,16 @@ export async function runAppServerTurn(
   eventLog: string,
   timing?: { timeoutSeconds: number; wrapUpSeconds: number; appendEventLog?: boolean },
 ): Promise<{ exitCode: number; timedOut: boolean; lines: string[] }> {
-  const worker = workerConfig(environment);
+  const harness = harnessConfig(environment);
   const { backend, guest } = environment.config;
-  const semanticCompaction = worker.compaction?.mode === "model-directed";
-  const maxSemanticCompactions = worker.compaction?.maxPerSession ?? 0;
-  const semanticReminderTokens = worker.compaction?.reminderTokens ?? 0;
+  const semanticCompaction = harness.compaction?.mode === "model-directed";
+  const maxSemanticCompactions = harness.compaction?.maxPerSession ?? 0;
+  const semanticReminderTokens = harness.compaction?.reminderTokens ?? 0;
   const command = new Deno.Command("/usr/bin/timeout", {
     args: [
       "--signal=TERM",
       "--kill-after=30s",
-      String(timing?.timeoutSeconds ?? worker.timeoutSeconds),
+      String(timing?.timeoutSeconds ?? harness.timeoutSeconds),
       backend.executable,
       "exec",
       "-T",
@@ -394,11 +394,11 @@ export async function runAppServerTurn(
   let semanticNextAction = "Continue the bounded optimization from the compacted checkpoint.";
   let requestId = 10;
   let writerClosed = false;
-  const timeoutSeconds = timing?.timeoutSeconds ?? worker.timeoutSeconds;
-  const wrapUpSeconds = timing?.wrapUpSeconds ?? worker.wrapUpSeconds ??
+  const timeoutSeconds = timing?.timeoutSeconds ?? harness.timeoutSeconds;
+  const wrapUpSeconds = timing?.wrapUpSeconds ?? harness.wrapUpSeconds ??
     Math.floor(timeoutSeconds * 0.8);
   if (wrapUpSeconds >= timeoutSeconds) {
-    throw new Error("Worker wrapUpSeconds must be less than timeoutSeconds");
+    throw new Error("Harness wrapUpSeconds must be less than timeoutSeconds");
   }
   const wrapUpTimer = setTimeout(async () => {
     if (writerClosed || !threadId || !activeTurnId) return;
@@ -424,7 +424,7 @@ export async function runAppServerTurn(
     if (noticeBusy || writerClosed || phase !== "working" || !threadId || !activeTurnId) return;
     noticeBusy = true;
     try {
-      const notice = JSON.parse(await Deno.readTextFile(worker.liveNoticePath)) as {
+      const notice = JSON.parse(await Deno.readTextFile(harness.liveNoticePath)) as {
         id?: string;
         message?: string;
       };
@@ -446,10 +446,10 @@ export async function runAppServerTurn(
         noticeId: notice.id ?? null,
         message: notice.message,
       });
-      await Deno.remove(worker.liveNoticePath);
+      await Deno.remove(harness.liveNoticePath);
     } catch (error) {
       if (!(error instanceof Deno.errors.NotFound)) {
-        console.error(`Could not deliver live worker notice: ${error}`);
+        console.error(`Could not deliver live harness notice: ${error}`);
       }
     } finally {
       noticeBusy = false;
@@ -462,7 +462,7 @@ export async function runAppServerTurn(
     params: {
       clientInfo: {
         name: "lm_tools_worker",
-        title: "lm-tools autonomous worker",
+        title: "lm-tools autonomous harness",
         version: "0.1.0",
       },
       capabilities: semanticCompaction ? { experimentalApi: true } : undefined,
@@ -698,17 +698,17 @@ async function runPiRpcTurn(
   prompt: string,
   eventLog: string,
 ): Promise<{ exitCode: number; timedOut: boolean; lines: string[] }> {
-  const worker = workerConfig(environment);
+  const harness = harnessConfig(environment);
   const { backend, guest } = environment.config;
-  const piCommand = worker.command;
+  const piCommand = harness.command;
   if (!piCommand?.length) {
-    throw new Error("A pi-rpc worker requires an explicit worker.command");
+    throw new Error("A pi-rpc harness requires an explicit harness.command");
   }
   const command = new Deno.Command("/usr/bin/timeout", {
     args: [
       "--signal=TERM",
       "--kill-after=30s",
-      String(worker.timeoutSeconds),
+      String(harness.timeoutSeconds),
       backend.executable,
       "exec",
       "-T",
@@ -739,9 +739,9 @@ async function runPiRpcTurn(
   let statsReceived = false;
   let finalMessageReceived = false;
   let writerClosed = false;
-  const wrapUpSeconds = worker.wrapUpSeconds ?? Math.floor(worker.timeoutSeconds * 0.8);
-  if (wrapUpSeconds >= worker.timeoutSeconds) {
-    throw new Error("Worker wrapUpSeconds must be less than timeoutSeconds");
+  const wrapUpSeconds = harness.wrapUpSeconds ?? Math.floor(harness.timeoutSeconds * 0.8);
+  if (wrapUpSeconds >= harness.timeoutSeconds) {
+    throw new Error("Harness wrapUpSeconds must be less than timeoutSeconds");
   }
   const closeWhenComplete = async () => {
     if (!settled || !statsReceived || !finalMessageReceived || writerClosed) return;
@@ -750,7 +750,7 @@ async function runPiRpcTurn(
   };
   const wrapUpTimer = setTimeout(async () => {
     if (writerClosed || settled) return;
-    const remaining = Math.max(1, worker.timeoutSeconds - wrapUpSeconds);
+    const remaining = Math.max(1, harness.timeoutSeconds - wrapUpSeconds);
     await writeRpc(writer, {
       type: "steer",
       message:
@@ -783,7 +783,7 @@ async function runPiRpcTurn(
     }
     if (message.type === "response") {
       if (message.id === "lm-tools-prompt" && message.success === false) {
-        throw new Error(`Pi rejected the worker prompt: ${String(message.error)}`);
+        throw new Error(`Pi rejected the harness prompt: ${String(message.error)}`);
       }
       if (message.id === "lm-tools-stats") statsReceived = true;
       if (message.id === "lm-tools-final") finalMessageReceived = true;
@@ -833,18 +833,344 @@ async function runPiRpcTurn(
   };
 }
 
+/**
+ * Reassembly of OMP protocol v2 `rpc_chunk` sequences into logical frames.
+ *
+ * Ported from vendor/omp `packages/coding-agent/src/modes/rpc/rpc-frame.ts`
+ * at the pinned revision; that module is the canonical wire contract. OMP caps
+ * one stdout frame at 1 MiB; larger logical frames arrive losslessly as base64
+ * chunks only after the host negotiates protocol v2.
+ */
+const OMP_MAX_REASSEMBLED_BYTES = 64 * 1024 * 1024;
+
+interface OmpChunkFrame {
+  type: "rpc_chunk";
+  chunkId: string;
+  index: number;
+  count: number;
+  byteLength: number;
+  data: string;
+}
+
+export class OmpRpcFrameDecoder {
+  #chunks = new Map<string, {
+    count: number;
+    byteLength: number;
+    nextIndex: number;
+    bytes: Uint8Array[];
+    receivedBytes: number;
+  }>();
+
+  decode(chunk: unknown): string | null {
+    const frame = chunk as OmpChunkFrame;
+    if (
+      frame.type !== "rpc_chunk" || typeof frame.chunkId !== "string" ||
+      typeof frame.index !== "number" || typeof frame.count !== "number" ||
+      typeof frame.byteLength !== "number" || typeof frame.data !== "string"
+    ) {
+      throw new Error("Malformed OMP rpc_chunk frame");
+    }
+    if (frame.count < 1 || frame.byteLength < 1 || frame.byteLength > OMP_MAX_REASSEMBLED_BYTES) {
+      throw new Error(`OMP rpc_chunk ${frame.chunkId} has invalid envelope`);
+    }
+    let pending = this.#chunks.get(frame.chunkId);
+    if (!pending) {
+      pending = {
+        count: frame.count,
+        byteLength: frame.byteLength,
+        nextIndex: 0,
+        bytes: [],
+        receivedBytes: 0,
+      };
+      this.#chunks.set(frame.chunkId, pending);
+    } else if (pending.count !== frame.count || pending.byteLength !== frame.byteLength) {
+      throw new Error(`OMP rpc_chunk ${frame.chunkId} envelope changed mid-sequence`);
+    }
+    if (frame.index !== pending.nextIndex) {
+      throw new Error(
+        `OMP rpc_chunk ${frame.chunkId} arrived out of order: expected ${pending.nextIndex}, got ${frame.index}`,
+      );
+    }
+    const bytes = Uint8Array.from(atob(frame.data), (character) => character.charCodeAt(0));
+    pending.bytes.push(bytes);
+    pending.receivedBytes += bytes.length;
+    pending.nextIndex = frame.index + 1;
+    if (pending.receivedBytes > pending.byteLength) {
+      throw new Error(`OMP rpc_chunk ${frame.chunkId} exceeded declared byteLength`);
+    }
+    if (pending.nextIndex < pending.count) return null;
+    this.#chunks.delete(frame.chunkId);
+    if (pending.receivedBytes !== pending.byteLength) {
+      throw new Error(`OMP rpc_chunk ${frame.chunkId} byte length mismatch`);
+    }
+    const total = pending.bytes.reduce((sum, part) => sum + part.length, 0);
+    const merged = new Uint8Array(total);
+    let offset = 0;
+    for (const part of pending.bytes) {
+      merged.set(part, offset);
+      offset += part.length;
+    }
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(merged);
+    if (decoded.length > OMP_MAX_REASSEMBLED_BYTES) {
+      throw new Error(`OMP reassembled frame exceeds ${OMP_MAX_REASSEMBLED_BYTES} bytes`);
+    }
+    return decoded;
+  }
+}
+
+async function runOmpRpcTurn(
+  environment: ResolvedAgentEnvironment,
+  prompt: string,
+  eventLog: string,
+  options: { attemptId: string },
+): Promise<{ exitCode: number; timedOut: boolean; lines: string[] }> {
+  const harness = harnessConfig(environment);
+  const { backend, guest } = environment.config;
+  const commandArgv = harness.command?.length ? harness.command : [
+    "omp",
+    "--mode",
+    "rpc",
+    "--no-lsp",
+    ...(harness.model ? ["--model", harness.model] : []),
+    "--session-dir",
+    join(guest.workspace, ".lm-tools", "omp-sessions", options.attemptId),
+  ];
+  const command = new Deno.Command("/usr/bin/timeout", {
+    args: [
+      "--signal=TERM",
+      "--kill-after=30s",
+      String(harness.timeoutSeconds),
+      backend.executable,
+      "exec",
+      "-T",
+      "--user",
+      String(guest.uid),
+      "--group",
+      String(guest.gid),
+      "--cwd",
+      guest.workspace,
+      "--env",
+      `HOME=${guest.home}`,
+      backend.instance,
+      "--",
+      ...commandArgv,
+    ],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "inherit",
+  }).spawn();
+  const writer = command.stdin.getWriter();
+  const raw = await Deno.open(eventLog, { createNew: true, write: true });
+  const lines: string[] = [];
+  const decoder = new TextDecoder();
+  const chunkDecoder = new OmpRpcFrameDecoder();
+  let pending = "";
+  let settled = false;
+  let statsReceived = false;
+  let finalMessageReceived = false;
+  let writerClosed = false;
+  const wrapUpSeconds = harness.wrapUpSeconds ?? Math.floor(harness.timeoutSeconds * 0.8);
+  if (wrapUpSeconds >= harness.timeoutSeconds) {
+    throw new Error("Harness wrapUpSeconds must be less than timeoutSeconds");
+  }
+  const closeWhenComplete = async () => {
+    if (!settled || !statsReceived || !finalMessageReceived || writerClosed) return;
+    writerClosed = true;
+    await writer.close();
+  };
+  const wrapUpTimer = setTimeout(async () => {
+    if (writerClosed || settled) return;
+    const remaining = Math.max(1, harness.timeoutSeconds - wrapUpSeconds);
+    await writeRpc(writer, {
+      type: "steer",
+      message:
+        `You have about ${Math.ceil(remaining / 60)} minutes before the hard session limit. ` +
+        "Stop broad exploration, finish the current bounded change, run the cheapest relevant " +
+        "checks, update the durable state and handoff files, write any evaluation request, " +
+        "and then end cleanly.",
+    }).catch(() => undefined);
+  }, wrapUpSeconds * 1000);
+
+  await writeRpc(writer, { id: "lm-tools-prompt", type: "prompt", message: prompt });
+
+  const processLogicalLine = async (line: string): Promise<void> => {
+    if (!line) return;
+    lines.push(line);
+    await raw.write(new TextEncoder().encode(`${line}\n`));
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const message = jsonObject(parsed);
+    if (!message) return;
+    if (message.type === "ready") {
+      const supported = Array.isArray(message.supportedProtocolVersions)
+        ? message.supportedProtocolVersions as unknown[]
+        : [];
+      if (supported.includes(2)) {
+        await writeRpc(writer, {
+          id: "lm-tools-protocol",
+          type: "negotiate_protocol",
+          protocolVersion: 2,
+        });
+      }
+      return;
+    }
+    if (message.type === "agent_end" && message.isTerminal !== false && !settled) {
+      settled = true;
+      await writeRpc(writer, { id: "lm-tools-stats", type: "get_session_stats" });
+      await writeRpc(writer, { id: "lm-tools-final", type: "get_last_assistant_text" });
+      return;
+    }
+    if (message.type === "response") {
+      if (message.id === "lm-tools-prompt" && message.success === false) {
+        throw new Error(`OMP rejected the harness prompt: ${String(message.error)}`);
+      }
+      if (message.id === "lm-tools-stats") statsReceived = true;
+      if (message.id === "lm-tools-final") finalMessageReceived = true;
+      await closeWhenComplete();
+      return;
+    }
+    if (message.type === "extension_ui_request" && typeof message.id === "string") {
+      if (message.method === "confirm") {
+        await writeRpc(writer, {
+          type: "extension_ui_response",
+          id: message.id,
+          confirmed: false,
+        });
+      } else if (["select", "input", "editor"].includes(String(message.method))) {
+        await writeRpc(writer, {
+          type: "extension_ui_response",
+          id: message.id,
+          cancelled: true,
+        });
+      }
+    }
+  };
+
+  const processPhysicalLine = async (line: string): Promise<void> => {
+    const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return;
+    }
+    if (jsonObject(parsed)?.type === "rpc_chunk") {
+      const reassembled = chunkDecoder.decode(parsed);
+      if (reassembled !== null) await processLogicalLine(reassembled);
+      return;
+    }
+    await processLogicalLine(trimmed);
+  };
+
+  try {
+    for await (const chunk of command.stdout) {
+      pending += decoder.decode(chunk, { stream: true });
+      const split = pending.split("\n");
+      pending = split.pop() ?? "";
+      for (const line of split) await processPhysicalLine(line);
+    }
+    pending += decoder.decode();
+    if (pending) await processPhysicalLine(pending);
+  } finally {
+    clearTimeout(wrapUpTimer);
+    raw.close();
+    if (!writerClosed) {
+      writerClosed = true;
+      await writer.close().catch(() => undefined);
+    }
+  }
+  const status = await command.status;
+  const timedOut = status.code === 124;
+  return {
+    exitCode: !timedOut && settled ? 0 : status.code || 1,
+    timedOut,
+    lines,
+  };
+}
+
+export function parseOmpRpcEvents(lines: string[]): {
+  usage: TokenUsage;
+  finalMessage: string | null;
+  compactions: number;
+  semanticCompactions: number;
+  compactionReminders: number;
+} {
+  let usage = { ...ZERO_USAGE };
+  const fallbackUsage = { ...ZERO_USAGE };
+  let finalMessage: string | null = null;
+  let compactions = 0;
+  let hasSessionStats = false;
+  for (const line of lines) {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (event.type === "auto_compaction_end" && event.aborted !== true && event.result) {
+      compactions += 1;
+    }
+    if (event.type === "message_end") {
+      const message = (event.message ?? {}) as Record<string, unknown>;
+      if (message.role === "assistant") {
+        const raw = (message.usage ?? {}) as Record<string, unknown>;
+        fallbackUsage.inputTokens += numberField(raw.input);
+        fallbackUsage.cachedInputTokens += numberField(raw.cacheRead);
+        fallbackUsage.outputTokens += numberField(raw.output);
+        fallbackUsage.totalTokens += numberField(raw.totalTokens);
+        const content = Array.isArray(message.content) ? message.content : [];
+        const text = content
+          .filter((item): item is Record<string, unknown> =>
+            item !== null && typeof item === "object" && !Array.isArray(item)
+          )
+          .filter((item) => item.type === "text" && typeof item.text === "string")
+          .map((item) => item.text as string)
+          .join("");
+        if (text) finalMessage = text;
+      }
+    }
+    if (event.type === "response" && event.success === true) {
+      const data = (event.data ?? {}) as Record<string, unknown>;
+      if (event.command === "get_session_stats") {
+        const tokens = (data.tokens ?? {}) as Record<string, unknown>;
+        usage = {
+          inputTokens: numberField(tokens.input),
+          cachedInputTokens: numberField(tokens.cacheRead),
+          outputTokens: numberField(tokens.output),
+          totalTokens: numberField(tokens.total),
+        };
+        hasSessionStats = true;
+      }
+      if (event.command === "get_last_assistant_text" && typeof data.text === "string") {
+        finalMessage = data.text;
+      }
+    }
+  }
+  return {
+    usage: hasSessionStats ? usage : fallbackUsage,
+    finalMessage,
+    compactions,
+    semanticCompactions: 0,
+    compactionReminders: 0,
+  };
+}
+
 async function runExecJsonTurn(
   environment: ResolvedAgentEnvironment,
   prompt: string,
   eventLog: string,
 ): Promise<{ exitCode: number; timedOut: boolean; lines: string[] }> {
-  const worker = workerConfig(environment);
+  const harness = harnessConfig(environment);
   const { backend, guest } = environment.config;
   const command = new Deno.Command("/usr/bin/timeout", {
     args: [
       "--signal=TERM",
       "--kill-after=30s",
-      String(worker.timeoutSeconds),
+      String(harness.timeoutSeconds),
       backend.executable,
       "exec",
       "-T",
@@ -948,16 +1274,16 @@ async function guestFileHash(
   return await stateHash(environment, path);
 }
 
-interface WorkerPhaseRequest {
+interface AttemptPhaseRequest {
   version: 1;
   next: string;
   reason?: string;
 }
 
-export function validateWorkerPhaseRequest(
+export function validateAttemptPhaseRequest(
   value: unknown,
   phaseNames: string[],
-): WorkerPhaseRequest {
+): AttemptPhaseRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("PHASE_REQUEST.json must be an object");
   }
@@ -971,22 +1297,22 @@ export function validateWorkerPhaseRequest(
     request.version !== 1 || typeof request.next !== "string" ||
     !phaseNames.includes(request.next)
   ) {
-    throw new Error(`Invalid requested worker phase: ${String(request.next)}`);
+    throw new Error(`Invalid requested harness phase: ${String(request.next)}`);
   }
   if (request.reason !== undefined && typeof request.reason !== "string") {
-    throw new Error("Worker phase-request reason must be a string");
+    throw new Error("Attempt phase-request reason must be a string");
   }
-  return request as unknown as WorkerPhaseRequest;
+  return request as unknown as AttemptPhaseRequest;
 }
 
-async function readWorkerPhaseRequest(
+async function readAttemptPhaseRequest(
   environment: ResolvedAgentEnvironment,
   path: string,
   phaseNames: string[],
-): Promise<WorkerPhaseRequest | undefined> {
+): Promise<AttemptPhaseRequest | undefined> {
   const text = await guestOutput(environment, ["cat", path]);
   if (text === null) return undefined;
-  const request = validateWorkerPhaseRequest(JSON.parse(text), phaseNames);
+  const request = validateAttemptPhaseRequest(JSON.parse(text), phaseNames);
   await guestOutput(environment, ["rm", "-f", path]);
   return request;
 }
@@ -1012,7 +1338,7 @@ async function repositorySnapshots(
   return snapshots;
 }
 
-async function cleanWorkerProcesses(
+async function cleanHarnessProcesses(
   environment: ResolvedAgentEnvironment,
   processNames: string[],
 ): Promise<void> {
@@ -1075,7 +1401,7 @@ function fallbackTurnSummary(
   exitCode: number,
   timedOut: boolean,
   finalMessage: string | null,
-  phases: WorkerPhaseRun[] | undefined,
+  phases: AttemptPhaseRun[] | undefined,
   stateChanged: boolean,
   error?: string,
 ): TurnResearchSummary {
@@ -1143,7 +1469,7 @@ async function generateTurnSummary(
     exitCode: number;
     timedOut: boolean;
     finalMessage: string | null;
-    phases: WorkerPhaseRun[] | undefined;
+    phases: AttemptPhaseRun[] | undefined;
     stateBefore: string | null;
     stateAfter: string | null;
     state: string | null;
@@ -1152,7 +1478,7 @@ async function generateTurnSummary(
     lines: string[];
   },
 ): Promise<TurnResearchSummary | undefined> {
-  const config = workerConfig(environment).turnSummary;
+  const config = harnessConfig(environment).turnSummary;
   if (!config) return undefined;
   const fallback = (error?: string) =>
     fallbackTurnSummary(
@@ -1180,7 +1506,7 @@ async function generateTurnSummary(
     `DURABLE STATE AFTER TURN\n${clipText(input.state ?? "unavailable", stateBudget)}\n\n` +
     `SELECTED TURN EVENTS\n${compactTurnTranscript(input.lines, transcriptBudget)}`;
   const prompt = `You are the research recorder for an autonomous software research campaign. ` +
-    `Summarize the completed worker turn from the supplied evidence. Be accurate and concrete: ` +
+    `Summarize the completed harness turn from the supplied evidence. Be accurate and concrete: ` +
     `separate observed evidence from hypotheses, say when no implementation was made, preserve ` +
     `important measurements and failed approaches, and name the most useful next action. Do not ` +
     `continue the research or call tools. Return exactly one JSON object with keys: title, status, ` +
@@ -1219,7 +1545,7 @@ async function generateTurnSummary(
 async function updateLedger(
   path: string,
   environmentName: string,
-  run: WorkerRun,
+  run: AttemptRun,
 ): Promise<CampaignLedger> {
   let ledger: CampaignLedger | undefined;
   try {
@@ -1256,68 +1582,68 @@ async function updateLedger(
   return ledger;
 }
 
-function workerConfig(environment: ResolvedAgentEnvironment): TurnLoopWorker {
-  const worker = environment.config.worker;
-  if (!worker || worker.kind !== "turn-loop") {
-    throw new Error("This action requires a turn-loop worker");
+function harnessConfig(environment: ResolvedAgentEnvironment): AttemptHarness {
+  const harness = environment.config.harness;
+  if (!harness || harness.kind !== "turn-loop") {
+    throw new Error("This action requires a turn-loop harness");
   }
-  return worker;
+  return harness;
 }
 
-export async function runWorkerOnce(
+export async function runAttemptOnce(
   environment: ResolvedAgentEnvironment,
   options: { startPhase?: string } = {},
-): Promise<{ run: WorkerRun; ledger: CampaignLedger }> {
-  const worker = workerConfig(environment);
+): Promise<{ run: AttemptRun; ledger: CampaignLedger }> {
+  const harness = harnessConfig(environment);
   const started = new Date();
   const id = started.toISOString().replaceAll(":", "").replaceAll(".", "-");
-  await Deno.mkdir(worker.metricsDirectory, { recursive: true });
-  const eventLog = join(worker.metricsDirectory, `${id}.jsonl`);
-  const currentPath = join(worker.metricsDirectory, "current.json");
+  await Deno.mkdir(harness.metricsDirectory, { recursive: true });
+  const eventLog = join(harness.metricsDirectory, `${id}.jsonl`);
+  const currentPath = join(harness.metricsDirectory, "current.json");
   await writeJsonAtomic(currentPath, {
     id,
     status: "starting",
     startedAt: started.toISOString(),
     eventLog,
-    prompt: worker.prompt,
-    state: worker.state,
-    transport: worker.transport,
+    prompt: harness.prompt,
+    state: harness.state,
+    adapter: harness.adapter,
   });
-  const prompt = await guestOutput(environment, ["cat", worker.prompt]);
-  if (prompt === null) throw new Error(`Could not read guest worker prompt: ${worker.prompt}`);
+  const prompt = await guestOutput(environment, ["cat", harness.prompt]);
+  if (prompt === null) throw new Error(`Could not read guest harness prompt: ${harness.prompt}`);
   const repositoriesBefore = await repositorySnapshots(
     environment,
-    worker.progressRepositories,
+    harness.progressRepositories,
   );
-  const stateBefore = await stateHash(environment, worker.state);
+  const stateBefore = await stateHash(environment, harness.state);
 
   await writeJsonAtomic(currentPath, {
     id,
     status: "running",
     startedAt: started.toISOString(),
     eventLog,
-    prompt: worker.prompt,
-    state: worker.state,
-    transport: worker.transport,
+    prompt: harness.prompt,
+    state: harness.state,
+    adapter: harness.adapter,
   });
   let result: { exitCode: number; timedOut: boolean; lines: string[] };
-  let phaseRuns: WorkerPhaseRun[] | undefined;
-  if (worker.transport === "app-server" && worker.phases?.length) {
+  let phaseRuns: AttemptPhaseRun[] | undefined;
+  if (harness.adapter === "app-server" && harness.phases?.length) {
     const lines: string[] = [];
     phaseRuns = [];
     let exitCode = 0;
     let timedOut = false;
     let phaseIndex = options.startPhase
-      ? worker.phases.findIndex((phase) => phase.name === options.startPhase)
+      ? harness.phases.findIndex((phase) => phase.name === options.startPhase)
       : 0;
-    if (phaseIndex < 0) throw new Error(`Unknown worker start phase: ${options.startPhase}`);
-    const phaseNames = worker.phases.map((phase) => phase.name);
-    const phaseControl = worker.phaseControl;
+    if (phaseIndex < 0) throw new Error(`Unknown harness start phase: ${options.startPhase}`);
+    const phaseNames = harness.phases.map((phase) => phase.name);
+    const phaseControl = harness.phaseControl;
     const finalPhaseIndex = phaseControl
-      ? worker.phases.findIndex((phase) => phase.name === phaseControl.finalPhase)
+      ? harness.phases.findIndex((phase) => phase.name === phaseControl.finalPhase)
       : -1;
     let transitions = 0;
-    while (phaseIndex < worker.phases.length) {
+    while (phaseIndex < harness.phases.length) {
       if (
         phaseControl && phaseIndex !== finalPhaseIndex &&
         ((Date.now() - started.getTime()) / 1000 >= phaseControl.maxWallSeconds ||
@@ -1334,7 +1660,7 @@ export async function runWorkerOnce(
         lines.push(JSON.stringify(forcedEvent));
         phaseIndex = finalPhaseIndex;
       }
-      const phase = worker.phases[phaseIndex];
+      const phase = harness.phases[phaseIndex];
       const phasePrompt = await guestOutput(environment, ["cat", phase.prompt]);
       if (phasePrompt === null) {
         throw new Error(`Could not read guest phase prompt: ${phase.prompt}`);
@@ -1355,8 +1681,8 @@ export async function runWorkerOnce(
         phaseStartedAt: phaseStarted.toISOString(),
         eventLog,
         prompt: phase.prompt,
-        state: worker.state,
-        transport: worker.transport,
+        state: harness.state,
+        adapter: harness.adapter,
       });
       const phaseEvent = JSON.stringify({
         type: "lm_tools.phase_started",
@@ -1405,8 +1731,8 @@ export async function runWorkerOnce(
           phaseStartedAt: phaseStarted.toISOString(),
           eventLog,
           prompt: phase.prompt,
-          state: worker.state,
-          transport: worker.transport,
+          state: harness.state,
+          adapter: harness.adapter,
         });
         const required = phase.requiredChangedFiles.map((path) => `- ${path}`).join("\n");
         const finalizationPrompt = `${prompt}\n\n${phasePrompt}\n\n` +
@@ -1479,10 +1805,10 @@ export async function runWorkerOnce(
       }
       if (phaseControl && phase.name === phaseControl.finalPhase) break;
       const requested = phaseControl
-        ? await readWorkerPhaseRequest(environment, phaseControl.requestPath, phaseNames)
+        ? await readAttemptPhaseRequest(environment, phaseControl.requestPath, phaseNames)
         : undefined;
       const nextIndex = requested
-        ? worker.phases.findIndex((candidate) => candidate.name === requested.next)
+        ? harness.phases.findIndex((candidate) => candidate.name === requested.next)
         : phaseIndex + 1;
       if (requested) {
         const transitionEvent = {
@@ -1499,27 +1825,31 @@ export async function runWorkerOnce(
     }
     result = { exitCode, timedOut, lines };
   } else {
-    result = worker.transport === "app-server"
+    result = harness.adapter === "app-server"
       ? await runAppServerTurn(environment, prompt, eventLog)
-      : worker.transport === "pi-rpc"
+      : harness.adapter === "pi-rpc"
       ? await runPiRpcTurn(environment, prompt, eventLog)
+      : harness.adapter === "omp-rpc"
+      ? await runOmpRpcTurn(environment, prompt, eventLog, { attemptId: id })
       : await runExecJsonTurn(environment, prompt, eventLog);
   }
-  await cleanWorkerProcesses(environment, worker.cleanupProcesses);
-  const parsed = worker.transport === "pi-rpc"
+  await cleanHarnessProcesses(environment, harness.cleanupProcesses);
+  const parsed = harness.adapter === "pi-rpc"
     ? parsePiRpcEvents(result.lines)
+    : harness.adapter === "omp-rpc"
+    ? parseOmpRpcEvents(result.lines)
     : parseCodexEventUsage(result.lines);
-  const stateAfter = await stateHash(environment, worker.state);
-  const repositoriesAfter = await repositorySnapshots(environment, worker.progressRepositories);
+  const stateAfter = await stateHash(environment, harness.state);
+  const repositoriesAfter = await repositorySnapshots(environment, harness.progressRepositories);
   let summary: TurnResearchSummary | undefined;
-  if (worker.turnSummary) {
+  if (harness.turnSummary) {
     await writeJsonAtomic(currentPath, {
       id,
       status: "summarizing",
       startedAt: started.toISOString(),
       eventLog,
-      state: worker.state,
-      transport: worker.transport,
+      state: harness.state,
+      adapter: harness.adapter,
     });
     summary = await generateTurnSummary(environment, {
       runId: id,
@@ -1529,7 +1859,7 @@ export async function runWorkerOnce(
       phases: phaseRuns,
       stateBefore,
       stateAfter,
-      state: await guestOutput(environment, ["cat", worker.state]),
+      state: await guestOutput(environment, ["cat", harness.state]),
       repositoriesBefore,
       repositoriesAfter,
       lines: result.lines,
@@ -1537,7 +1867,7 @@ export async function runWorkerOnce(
     if (summary) {
       try {
         await appendTurnSummary(
-          join(worker.metricsDirectory, "summaries.json"),
+          join(harness.metricsDirectory, "summaries.json"),
           environment.config.name,
           summary,
         );
@@ -1547,7 +1877,7 @@ export async function runWorkerOnce(
     }
   }
   const finished = new Date();
-  const run: WorkerRun = {
+  const run: AttemptRun = {
     id,
     startedAt: started.toISOString(),
     finishedAt: finished.toISOString(),
@@ -1567,9 +1897,9 @@ export async function runWorkerOnce(
     summary,
     phases: phaseRuns,
   };
-  await writeJsonAtomic(join(worker.metricsDirectory, `${id}.json`), run);
+  await writeJsonAtomic(join(harness.metricsDirectory, `${id}.json`), run);
   const ledger = await updateLedger(
-    join(worker.metricsDirectory, "campaign.json"),
+    join(harness.metricsDirectory, "campaign.json"),
     environment.config.name,
     run,
   );
@@ -1580,18 +1910,18 @@ export async function runWorkerOnce(
     finishedAt: finished.toISOString(),
     exitCode: run.exitCode,
     eventLog,
-    report: join(worker.metricsDirectory, `${id}.json`),
+    report: join(harness.metricsDirectory, `${id}.json`),
   });
   return { run, ledger };
 }
 
-export async function runWorkerLoop(environment: ResolvedAgentEnvironment): Promise<never> {
-  const worker = workerConfig(environment);
+export async function runAttemptLoop(environment: ResolvedAgentEnvironment): Promise<never> {
+  const harness = harnessConfig(environment);
   while (true) {
     try {
-      const { run, ledger } = await runWorkerOnce(environment);
+      const { run, ledger } = await runAttemptOnce(environment);
       console.log(
-        `Worker ${run.id}: exit=${run.exitCode}, ${run.durationSeconds.toFixed(1)}s, ` +
+        `Attempt ${run.id}: exit=${run.exitCode}, ${run.durationSeconds.toFixed(1)}s, ` +
           `${
             run.usage.totalTokens.toLocaleString("en-US")
           } tokens, ${run.compactions} compactions (${run.semanticCompactions} model-directed, ` +
@@ -1600,8 +1930,8 @@ export async function runWorkerLoop(environment: ResolvedAgentEnvironment): Prom
       );
       if (run.finalMessage) console.log(run.finalMessage.trim());
     } catch (error) {
-      console.error(`Worker turn failed before it could be recorded: ${error}`);
+      console.error(`Attempt failed before it could be recorded: ${error}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, worker.cooldownSeconds * 1000));
+    await new Promise((resolve) => setTimeout(resolve, harness.cooldownSeconds * 1000));
   }
 }
