@@ -150,6 +150,7 @@ Deno.test("bounds provider attempts", async () => {
 Deno.test("cancellation never fails over", async () => {
   const controller = new AbortController();
   const seen: string[] = [];
+  const events: string[] = [];
   const adapter: FreeAccessAdapter<string, Event> = {
     id: "test",
     async *stream(offer) {
@@ -166,6 +167,7 @@ Deno.test("cancellation never fails over", async () => {
         [freeOffer({ id: "one" }), freeOffer({ id: "two" })],
         "",
         controller.signal,
+        (event) => events.push(event.type),
       )
     ) {
       // Cancellation occurs before output.
@@ -173,4 +175,5 @@ Deno.test("cancellation never fails over", async () => {
   };
   await assertRejects(consume, DOMException, "cancelled");
   assertEquals(seen, ["one"]);
+  assertEquals(events, ["attempt", "cancelled"]);
 });

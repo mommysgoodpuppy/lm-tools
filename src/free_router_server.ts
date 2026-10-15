@@ -412,7 +412,7 @@ export class FreeRouterObserver {
         ? { failure: { kind: event.failure.kind, message: event.failure.message } }
         : {}),
     });
-    if (event.type === "completed") this.#persist(request);
+    if (event.type === "completed" || event.type === "cancelled") this.#persist(request);
   }
 
   observeChunk(id: string, value: unknown): void {

@@ -99,7 +99,7 @@ export interface FreeAccessAdapter<TRequest, TEvent extends NormalizedAccessEven
 }
 
 export interface RouterAttemptEvent {
-  type: "attempt" | "failure" | "committed" | "completed";
+  type: "attempt" | "failure" | "committed" | "completed" | "cancelled";
   offer: FreeRouteOffer;
   failure?: AccessFailure;
 }
@@ -281,7 +281,10 @@ export class FreeRouter<TRequest, TEvent extends NormalizedAccessEvent> {
         observe({ type: "completed", offer });
         return;
       } catch (error) {
-        throwIfAborted(signal);
+        if (signal?.aborted) {
+          observe({ type: "cancelled", offer });
+          throw signal.reason ?? error;
+        }
         const failure = failureFrom(error);
         observe({ type: "failure", offer, failure });
         if (committed) throw new StreamCommittedError(offer, failure);
