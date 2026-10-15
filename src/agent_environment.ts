@@ -93,7 +93,7 @@ export interface AgentEnvironmentConfig {
   $schema?: string;
   version: 2;
   name: string;
-  modelDeployment: string;
+  modelDeployment?: string;
   seedOnCreate: boolean;
   backend: {
     kind: "incus";
@@ -223,7 +223,9 @@ export async function loadAgentEnvironment(path: string): Promise<ResolvedAgentE
     );
   }
   const config = parsed as AgentEnvironmentConfig;
-  const model = await loadDeployment(resolve(dirname(sourcePath), config.modelDeployment));
+  const model = config.modelDeployment
+    ? await loadDeployment(resolve(dirname(sourcePath), config.modelDeployment))
+    : null;
   return { sourcePath, config, model };
 }
 
@@ -1126,7 +1128,7 @@ async function validateEnvironment(
       tailscalePorts.add(service.tailscaleServe.httpsPort);
     }
   }
-  modelEndpoint(environment);
+  if (environment.model) modelEndpoint(environment);
 }
 
 export function assertInstanceMayBeCreated(
@@ -2057,8 +2059,8 @@ export async function runEnvironmentAction(
     await reconcileExposure(environment);
   } else if (action === "model-proxy") await serveModelProxy(environment);
   else if (action === "attempt-once") {
-    if (!environment.model) {
-      throw new Error("Attempt actions require a declared model deployment");
+    if (!environment.model && environment.config.harness?.adapter !== "omp-rpc") {
+      throw new Error("This attempt adapter requires a declared model deployment");
     }
     const { run, ledger } = await runAttemptOnce(environment);
     console.log(

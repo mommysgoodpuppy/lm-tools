@@ -13,7 +13,7 @@ interface RepositorySnapshot {
   status: string;
 }
 
-interface AttemptRun {
+export interface AttemptRun {
   id: string;
   startedAt: string;
   finishedAt: string;
@@ -25,6 +25,9 @@ interface AttemptRun {
   semanticCompactions: number;
   compactionReminders: number;
   eventLog: string;
+  stderrLog?: string;
+  nativeSessionDirectory?: string;
+  nativeProfileDirectory?: string;
   stateBefore: string | null;
   stateAfter: string | null;
   repositoriesBefore: Record<string, RepositorySnapshot>;
@@ -55,7 +58,7 @@ interface TurnSummaryLedger {
   entries: TurnResearchSummary[];
 }
 
-interface AttemptPhaseRun {
+export interface AttemptPhaseRun {
   name: string;
   startedAt: string;
   finishedAt: string;
@@ -67,7 +70,7 @@ interface AttemptPhaseRun {
   requiredChangedFiles: string[];
 }
 
-interface CampaignLedger {
+export interface CampaignLedger {
   version: 1;
   environment: string;
   startedAt: string;
@@ -922,16 +925,26 @@ async function runOmpRpcTurn(
   environment: ResolvedAgentEnvironment,
   prompt: string,
   eventLog: string,
-  options: { attemptId: string },
+  options: {
+    attemptId: string;
+    stderrLog?: string;
+    guestEnvironment?: Record<string, string>;
+    model?: string;
+  },
 ): Promise<{ exitCode: number; timedOut: boolean; lines: string[] }> {
   const harness = harnessConfig(environment);
   const { backend, guest } = environment.config;
+  for (const [key, value] of Object.entries(options.guestEnvironment ?? {})) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || value.includes("\0")) {
+      throw new Error(`Invalid guest environment entry: ${key}`);
+    }
+  }
   const commandArgv = harness.command?.length ? harness.command : [
     "omp",
     "--mode",
     "rpc",
     "--no-lsp",
-    ...(harness.model ? ["--model", harness.model] : []),
+    ...((options.model ?? harness.model) ? ["--model", (options.model ?? harness.model)!] : []),
     "--session-dir",
     join(guest.workspace, ".lm-tools", "omp-sessions", options.attemptId),
   ];
@@ -951,14 +964,29 @@ async function runOmpRpcTurn(
       guest.workspace,
       "--env",
       `HOME=${guest.home}`,
+      ...Object.entries(options.guestEnvironment ?? {}).flatMap(([key, value]) => [
+        "--env",
+        `${key}=${value}`,
+      ]),
       backend.instance,
       "--",
       ...commandArgv,
     ],
     stdin: "piped",
     stdout: "piped",
-    stderr: "inherit",
+    stderr: options.stderrLog ? "piped" : "inherit",
   }).spawn();
+  const stderrTask = options.stderrLog
+    ? (async () => {
+      await Deno.mkdir(dirname(options.stderrLog!), { recursive: true });
+      const file = await Deno.open(options.stderrLog!, { createNew: true, write: true });
+      try {
+        for await (const chunk of command.stderr) await file.write(chunk);
+      } finally {
+        file.close();
+      }
+    })()
+    : Promise.resolve();
   const writer = command.stdin.getWriter();
   const raw = await Deno.open(eventLog, { createNew: true, write: true });
   const lines: string[] = [];
@@ -1084,6 +1112,7 @@ async function runOmpRpcTurn(
     }
   }
   const status = await command.status;
+  await stderrTask;
   const timedOut = status.code === 124;
   return {
     exitCode: !timedOut && settled ? 0 : status.code || 1,
@@ -1590,16 +1619,65 @@ function harnessConfig(environment: ResolvedAgentEnvironment): AttemptHarness {
   return harness;
 }
 
+export interface AttemptRunOptions {
+  startPhase?: string;
+  /** Supply a campaign-owned prompt without requiring a guest prompt file. */
+  promptText?: string;
+  /** Redirect the legacy harness run records into an attempt-owned directory. */
+  metricsDirectory?: string;
+  /** Capture adapter-native diagnostics and session state beneath this directory. */
+  captureDirectory?: string;
+  /** Per-attempt environment overlay passed to the guest harness process. */
+  guestEnvironment?: Record<string, string>;
+  /** Override the environment's default OMP model for this attempt. */
+  model?: string;
+  /** Guest OMP profile/state directory to export after the attempt. */
+  guestProfileDirectory?: string;
+}
+
+async function pullGuestDirectory(
+  environment: ResolvedAgentEnvironment,
+  guestPath: string,
+  hostPath: string,
+): Promise<boolean> {
+  if (await guestOutput(environment, ["test", "-d", guestPath]) === null) return false;
+  await Deno.mkdir(dirname(hostPath), { recursive: true });
+  const { backend } = environment.config;
+  const output = await new Deno.Command(backend.executable, {
+    args: [
+      "file",
+      "pull",
+      "--recursive",
+      "--create-dirs",
+      "--no-dereference",
+      `${backend.instance}${guestPath}`,
+      hostPath,
+    ],
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  if (!output.success) {
+    const error = new TextDecoder().decode(output.stderr).trim();
+    throw new Error(`Could not export guest directory ${guestPath}: ${error}`);
+  }
+  return true;
+}
+
 export async function runAttemptOnce(
   environment: ResolvedAgentEnvironment,
-  options: { startPhase?: string } = {},
+  options: AttemptRunOptions = {},
 ): Promise<{ run: AttemptRun; ledger: CampaignLedger }> {
   const harness = harnessConfig(environment);
   const started = new Date();
   const id = started.toISOString().replaceAll(":", "").replaceAll(".", "-");
-  await Deno.mkdir(harness.metricsDirectory, { recursive: true });
-  const eventLog = join(harness.metricsDirectory, `${id}.jsonl`);
-  const currentPath = join(harness.metricsDirectory, "current.json");
+  const metricsDirectory = options.metricsDirectory ?? harness.metricsDirectory;
+  const stderrLog = options.captureDirectory && harness.adapter === "omp-rpc"
+    ? join(options.captureDirectory, "stderr.log")
+    : undefined;
+  await Deno.mkdir(metricsDirectory, { recursive: true });
+  const eventLog = join(metricsDirectory, `${id}.jsonl`);
+  const currentPath = join(metricsDirectory, "current.json");
   await writeJsonAtomic(currentPath, {
     id,
     status: "starting",
@@ -1609,7 +1687,7 @@ export async function runAttemptOnce(
     state: harness.state,
     adapter: harness.adapter,
   });
-  const prompt = await guestOutput(environment, ["cat", harness.prompt]);
+  const prompt = options.promptText ?? await guestOutput(environment, ["cat", harness.prompt]);
   if (prompt === null) throw new Error(`Could not read guest harness prompt: ${harness.prompt}`);
   const repositoriesBefore = await repositorySnapshots(
     environment,
@@ -1830,8 +1908,44 @@ export async function runAttemptOnce(
       : harness.adapter === "pi-rpc"
       ? await runPiRpcTurn(environment, prompt, eventLog)
       : harness.adapter === "omp-rpc"
-      ? await runOmpRpcTurn(environment, prompt, eventLog, { attemptId: id })
+      ? await runOmpRpcTurn(environment, prompt, eventLog, {
+        attemptId: id,
+        stderrLog,
+        guestEnvironment: options.guestEnvironment,
+        model: options.model,
+      })
       : await runExecJsonTurn(environment, prompt, eventLog);
+  }
+  let nativeSessionDirectory: string | undefined;
+  let nativeProfileDirectory: string | undefined;
+  if (options.captureDirectory && harness.adapter === "omp-rpc") {
+    if (harness.command?.length) {
+      throw new Error(
+        "OMP native-session capture requires the default command so lm-tools controls --session-dir",
+      );
+    }
+    const guestSessionDirectory = join(
+      environment.config.guest.workspace,
+      ".lm-tools",
+      "omp-sessions",
+      id,
+    );
+    const hostSessionDirectory = join(options.captureDirectory, "omp-session");
+    if (await pullGuestDirectory(environment, guestSessionDirectory, hostSessionDirectory)) {
+      nativeSessionDirectory = hostSessionDirectory;
+    }
+    if (options.guestProfileDirectory) {
+      const hostProfileDirectory = join(options.captureDirectory, "omp-profile-state");
+      if (
+        await pullGuestDirectory(
+          environment,
+          options.guestProfileDirectory,
+          hostProfileDirectory,
+        )
+      ) {
+        nativeProfileDirectory = hostProfileDirectory;
+      }
+    }
   }
   await cleanHarnessProcesses(environment, harness.cleanupProcesses);
   const parsed = harness.adapter === "pi-rpc"
@@ -1867,7 +1981,7 @@ export async function runAttemptOnce(
     if (summary) {
       try {
         await appendTurnSummary(
-          join(harness.metricsDirectory, "summaries.json"),
+          join(metricsDirectory, "summaries.json"),
           environment.config.name,
           summary,
         );
@@ -1889,6 +2003,9 @@ export async function runAttemptOnce(
     semanticCompactions: parsed.semanticCompactions,
     compactionReminders: parsed.compactionReminders,
     eventLog,
+    stderrLog,
+    nativeSessionDirectory,
+    nativeProfileDirectory,
     stateBefore,
     stateAfter,
     repositoriesBefore,
@@ -1897,9 +2014,9 @@ export async function runAttemptOnce(
     summary,
     phases: phaseRuns,
   };
-  await writeJsonAtomic(join(harness.metricsDirectory, `${id}.json`), run);
+  await writeJsonAtomic(join(metricsDirectory, `${id}.json`), run);
   const ledger = await updateLedger(
-    join(harness.metricsDirectory, "campaign.json"),
+    join(metricsDirectory, "campaign.json"),
     environment.config.name,
     run,
   );
@@ -1910,7 +2027,7 @@ export async function runAttemptOnce(
     finishedAt: finished.toISOString(),
     exitCode: run.exitCode,
     eventLog,
-    report: join(harness.metricsDirectory, `${id}.json`),
+    report: join(metricsDirectory, `${id}.json`),
   });
   return { run, ledger };
 }

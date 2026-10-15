@@ -1,6 +1,6 @@
 # Host (non-Incus) environment backend
 
-Status: open; blocked by nothing, but campaign-harness-profiles is higher value Created: 2026-09-18
+Status: open; lower priority than adapting attempt harnesses to the campaign API Created: 2026-09-18
 Scope: lm-tools
 
 ## Problem

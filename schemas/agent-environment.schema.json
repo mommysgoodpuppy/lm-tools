@@ -7,7 +7,6 @@
   "required": [
     "version",
     "name",
-    "modelDeployment",
     "seedOnCreate",
     "backend",
     "guest",

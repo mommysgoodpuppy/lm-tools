@@ -61,14 +61,12 @@ asked; it only provisions and supervises the runtime substrate.
 
 The top layer splits by **bounded versus unbounded agency**:
 
-- **Campaign** — bounded. A campaign asks one bounded question per task, executes it as an attempt,
-  records a schema-valid result, and stops. Campaigns live in consuming projects (for example a
-  future `lm-project`): task manifests, runner/harness profiles, environment profiles, prompts, and
-  policy. A campaign attempt is the product of
-  `task manifest × harness profile × environment
-  profile × pinned revisions`. Attempts are
-  recorded, replayable, and never silently reuse a dirty workspace. See the SteamVR-tools
-  `TASK-DEPLOYMENT.md` design for the research-task application of this layer.
+- **Campaign** — bounded, programmatic agency. A consuming project writes trusted code that chooses
+  questions, harness and environment profiles, concurrency, interpretation, and follow-up work.
+  Named attempt effects preserve their selected inputs, operational outcome, and arbitrary hashed
+  artifacts. lm-tools does not define a universal task, research-result, scoring, or completion
+  schema. Interpretations can evolve and be recomputed from immutable attempt artifacts. See
+  [`campaigns.md`](campaigns.md).
 - **Claw** — unbounded. A standing agent that keeps working: open-ended conversations,
   self-scheduled work (cron), persistent identity, memory, and workspace. A claw is declared with
   `schemas/claw.schema.json` and managed by `lm claw CONFIG ...`; it composes inference (a model
@@ -79,7 +77,8 @@ The top layer splits by **bounded versus unbounded agency**:
   attempt; the standing process itself never is.
 
 The two share infrastructure but not state: a claw's memory/workspace belongs to the claw; a
-campaign's durable state is its recorded attempts and promoted results. Attempt harnesses serve
+campaign's generic durable state is its named operational attempts and artifacts. Project-owned code
+decides which derived interpretations or promoted results to retain. Attempt harnesses serve
 campaigns; service harnesses serve claws.
 
 ## Observability and audit
@@ -98,7 +97,7 @@ Every attempt and service inference is captured twice:
   of `attemptHarness` or `serviceHarness`.
 - `attempt` — one bounded execution of an attempt harness. CLI: `lm env ... --attempt-once`,
   `--attempt-loop`, `--attempt-metrics`, `--attempt-dashboard`.
-- `campaign` — bounded agency: recorded, replayable attempts against task manifests.
+- `campaign` — a bounded program using durable named attempt effects.
 - `claw` — unbounded agency: a standing agent on a service harness (e.g. Shellie).
 - Stored identifiers such as the `lm_tools_worker` metric name predate this vocabulary and are kept
   for ledger continuity; they are not concepts.
