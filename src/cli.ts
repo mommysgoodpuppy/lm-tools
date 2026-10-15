@@ -6,6 +6,7 @@ import { environmentCommand, environmentUsage } from "./agent_environment.ts";
 import { clawCommand, clawUsage } from "./claw.ts";
 import { llamaCommand, llamaUsage } from "./llama.ts";
 import { freeRouterCommand, freeRouterUsage } from "./free_router_server.ts";
+import { taskCommand } from "./omp_task.ts";
 import { proxyCommand, proxyUsage } from "./proxy.ts";
 import { vendorCommand, vendorUsage } from "./vendor.ts";
 
@@ -24,6 +25,7 @@ Commands:
   env       Manage a declarative isolated agent environment
   claw      Manage a declared unbounded standing agent (claw)
   free-router  Serve an explicitly zero-priced remote inference pool
+  task      Run one bounded OMP task (profiles: free, paid)
   kill-everything  Stop all configured model services and inference processes
   llama     Launch llama-server with useful local defaults
   proxy     Adapt OpenAI-compatible traffic for clients such as VS Code
@@ -58,6 +60,9 @@ export async function main(args: string[]): Promise<void> {
       return;
     case "free-router":
       await freeRouterCommand(commandArgs);
+      return;
+    case "task":
+      await taskCommand(commandArgs);
       return;
     case "llama":
     case "serve":

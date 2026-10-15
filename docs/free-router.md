@@ -24,6 +24,21 @@ An access adapter owns:
 A consuming project owns enabled providers, account enrollment, secret inputs, deployment, and
 whether paid or local routes may be used. The router defaults both paid and local inference off.
 
+## OMP consumer profiles
+
+`src/free_router_omp.ts` turns one or more configured public lanes into a keyless OMP `models.yml`
+provider. This supports separate primary and worker lanes in one isolated profile. The generated
+profile contains only public model ids, limits, zero cost, and the local/router base URL. It
+deliberately omits the auth-gateway bearer-token path and concrete upstream routes.
+`freeRouterPublicModelIdentity()` separately returns the eligible route identity for an attempt
+fingerprint, without authentication state. This keeps runtime configuration least-privileged while
+still making a campaign attributable when route membership or ordering changes.
+
+Consumers should place the generated `models.yml` in an isolated OMP agent directory and launch OMP
+with `PI_CODING_AGENT_DIR` pointing at that directory. A free-router lane being technically usable
+does not authorize arbitrary project artifacts for remote inference; the consuming campaign owns
+that policy.
+
 ## OMP access adapter
 
 The router depends on an interface, not on a particular provider library. Its first implementation
@@ -106,7 +121,41 @@ the next eligible offer. Once output is committed, changing models would splice 
 together, so the failure is terminal and the client may retry as a new request.
 
 Both attempts and pre-commit buffering are bounded. Client cancellation is terminal and never causes
-the router to start another provider request.
+the router to start another provider request. It emits a terminal `cancelled` route event so live
+status no longer reports the route as active, without applying a failure cooldown.
 
 This split lets provider access evolve independently. OMP can be replaced or supplemented by another
 adapter without moving login flows into `lm-tools` or changing the routing policy.
+
+## Campaign-owned sessions
+
+A standing router service is right for a persistent claw, but a bounded campaign should own its
+router instead of depending on one. `src/free_router_session.ts` provides `startFreeRouterSession`:
+
+```ts
+await using router = await startFreeRouterSession({
+  listen: { host: "10.248.172.1", port: 1261 },
+  models: [nvidiaGlm53Flash], // resolved, credential-free lanes
+  ompGateway: { baseUrl: "http://127.0.0.1:4000", bearerTokenFile: "/path/to/token" },
+  artifactsDirectory: join(workspace.artifactsDirectory, "router"),
+});
+// router.baseUrl, router.publicModels, router.receipt()
+```
+
+Properties:
+
+- The server runs inside the calling process, so an interrupted campaign can never orphan a router.
+- Only the declared lanes exist; the router cannot silently fall back to another provider or model,
+  and startup fails closed if a lane is not eligible at readiness.
+- `config.json` (credential-free), `audit.jsonl` (complete route decisions), and `receipt.json`
+  (startup, readiness, shutdown reason) land beneath the supplied artifact directory.
+- The fixed port is held by a fail-fast lease in `XDG_RUNTIME_DIR`; a second session on the same
+  port is an error, never an eviction of another campaign's router.
+- `shutdown(reason)` is idempotent and records why the router stopped; `await using` disposes with
+  reason `disposed`, and an external `AbortSignal` records `cancelled`.
+- Bearer tokens stay in memory. The materialized config and receipts never contain credential
+  material.
+
+For campaign composition, `src/campaign.ts` exposes `planAttempt` and `readAttemptRecord` so a
+program can decide whether external resources must be started at all: a replay whose consuming
+attempt is already durable starts no router and issues no model request again.

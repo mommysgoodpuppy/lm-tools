@@ -13,6 +13,7 @@ lm deploy      validate and run a model deployment
 lm download    download large artifacts with resume and integrity checks
 lm env         manage an isolated declarative agent environment
 lm free-router serve an explicitly zero-priced remote inference pool through OMP
+lm task        run one bounded OMP task with the free or paid profile
 lm proxy       provide OpenAI-compatible request and stream normalization
 lm vendor      materialize and verify pinned source builds
 ```
@@ -83,6 +84,53 @@ deno run -A main.ts env project/environment.json --status
 
 Secrets should remain ignored by the consuming project. Secret inputs must be mode `0600`, ignored
 by Git, declared separately from ordinary seeds, and targeted outside the guest workspace.
+
+## Campaign programs
+
+Campaigns are programmatic rather than manifest-defined. The API records durable, fingerprinted
+attempt effects and arbitrary hashed artifacts while leaving questions, interpretations, scoring,
+and follow-up policy to the consuming project. See [`docs/campaigns.md`](docs/campaigns.md).
+
+## Tasks
+
+`lm task` runs one bounded OMP task with a thin, stable contract: a prompt, a working directory, and
+exactly one of two inference profiles. There is no research-result schema; the model's final text is
+arbitrary and only operational facts (termination, usage, routes, artifacts) are recorded.
+
+```bash
+# Paid: normal OMP with the machine default paid model/config.
+# The expected profile for code implementation and difficult bounded work.
+lm task --profile paid --cwd /path/to/project \
+  --prompt-file /tmp/prompt.md
+
+# Free: zero-cost inference only. Starts a campaign-owned free-router session
+# for exactly this task from an existing free-router config and fails closed
+# if no lane is eligible. Intended for review, standing-claw style batch work,
+# and mass tasks such as reverse engineering.
+lm task --profile free --cwd /path/to/project \
+  --router-config project/free-router.json \
+  --prompt "Review this diff for correctness." \
+  --json
+```
+
+Flags: `--profile free|paid` and `--cwd PATH` are required; `--router-config PATH` is required for
+`free` and rejected for `paid`; the prompt comes from `--prompt TEXT`, `--prompt-file PATH`, or
+stdin (at most one flag, never both); `--model ID` overrides the OMP model (free defaults to the
+router lane); `--timeout-seconds N` bounds the process (default 3600); `--json` prints the
+operational envelope instead of the final answer text, so Codex or scripts can parse it.
+
+Both profiles supervise their OMP process with the hard timeout and external cancellation, and never
+leave an orphaned process or router behind. Each task isolates its OMP session directory and
+operational artifacts under `<cwd>/.lm-task/<id>/` (`events.jsonl`, `stderr.log`,
+`task-result.json`, the OMP session, and for `free` a `router/` config/audit/receipt set). Paid
+inference never routes through a free router; free inference never falls back to paid. Free-route
+bearer credentials are only resolved through the configured OMP gateway and are never persisted or
+printed.
+
+Programmatic use — `runOmpTask` in `src/omp_task.ts` takes the same inputs as options and returns
+the operational envelope, so campaign programs can fan out tasks without a CLI. Prerequisites: the
+pinned `omp` executable (`deno task omp:check`), an OMP account enrolled for paid inference, and —
+for the free profile — a free-router config whose lanes are eligible through the OMP gateway.
 
 ## Claws
 
