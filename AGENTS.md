@@ -16,8 +16,16 @@ deployments, vendor builds, proxies, free-router, agent environments, claws, tas
   check, lint, type check, tests). Run: `deno task lm <command>`.
 - This repository stays machine- and model-agnostic. Concrete deployments, vendor manifests,
   patches, base configs and service units belong to the consuming project, not here.
-- `vendor/omp` and `vendor/t3code` are pinned submodules (`*.version` files record the pins); do not
-  edit them in place. `deno task omp:check` verifies the OMP pin.
+- `vendor/` holds two pinned source submodules that serve as infrastructure for lm-tools, not as
+  separate projects. The `*.version` files record each pin.
+  - `vendor/omp`: oh-my-pi (OMP), pinned to an upstream release tag. lm-tools uses it for model
+    routing and accounts (the OMP broker and gateway behind free-router and `lm task`) and as the
+    `omp-rpc` agent harness. `deno task omp:check` verifies the source and the installed `omp` match
+    the pin.
+  - `vendor/t3code`: our fork of T3 Code on branch `lm-tools-campaign-observer`, used as the
+    frontend framework for lm-tools UIs (the campaign and free-router observer). Change it with
+    commits on that branch, then update the submodule pointer and `t3code.version`; build it with
+    `deno task t3code:build`.
 - Deployments take the GPU exclusively and evict conflicting servers. Do not start one while another
   model server or GPU benchmark is running unless that is the point.
 - Proxy diagnostics and request captures (`logs/`, `results/`, `api-jsons/`) can contain full
