@@ -47,6 +47,9 @@ export function buildHipfireArgs(backend: HipfireBackend): string[] {
     backend.kvMode,
     "--max-seq",
     String(backend.maxSeq),
+    // The deployment owns the GPU exclusively; keep the model resident like llama-server.
+    "--idle-timeout",
+    "0",
     ...(backend.ui ? ["--ui"] : []),
   ];
 }

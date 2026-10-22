@@ -48,6 +48,8 @@ Deno.test("builds hipfire serve arguments and environment", () => {
     "q8",
     "--max-seq",
     "188416",
+    "--idle-timeout",
+    "0",
     "--ui",
   ]);
   assertEquals(hipfireDaemonPath(backend("/home")), "/opt/hipfire/target/release/daemon");
