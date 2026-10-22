@@ -25,9 +25,29 @@ deployments, vendor builds, proxies, free-router, agent environments, claws, tas
 
 ## Related projects
 
-- `../qwen-local`: consumes lm-tools. Owns the concrete Qwen deployments, vendor manifests
-  (llama.cpp, hipfire), patches, `base.json` and the `lm-qwen.service` unit. lm-tools owns the
-  schemas and the runtime that executes them.
+Local projects (not on GitHub) consume lm-tools through `../lm-tools` paths. Keep their `$schema`
+references, imports and CLI invocations working when changing schemas or exported APIs, and grep
+`~/git` for usages before renaming or removing anything.
+
+- `../qwen-local`: Qwen3.8-27B deployments for this machine, vendor manifests (llama.cpp, hipfire),
+  patches, `base.json` and the `lm-qwen.service` host unit.
+- `../gemma431bdeploy`: Gemma 4 31B IT deployment on the system llama-server.
+- `../diffusiongemma-lab`: DiffusionGemma deployment and patched backend build
+  (`llama.cpp-diffusion` backend, `lm vendor`).
+- `../talkie-1930-13b-it-q5`: Talkie 1930 13B GGUF release with a patched llama.cpp runtime and an
+  lm-tools deployment.
+- `../escape-velocity-shellie`: Shellie's free-inference-first Hermes claw: `claw.json`, free-router
+  config and OMP broker/gateway/observer units.
+- `../ps2-linux-agent-campaign`: PS2 Linux agent campaign: Incus environment, worker services and
+  dashboard; uses `../qwen-local` for the model.
+- `../qwen-tinygrad-campaign`: Qwen/tinygrad optimization campaign: campaign runner, agent
+  environments and evaluators on the campaign API.
+- `../modelsearch`: model comparison and judging experiments that import the free-router modules
+  directly.
+- `../steamvr-tools`: its `lm-project/` holds SteamVR model-assisted research campaigns.
+
+lm-tools owns the generic schemas and runtime; anything specific to one model, machine or campaign
+belongs in the consuming project.
 
 ## Git
 
