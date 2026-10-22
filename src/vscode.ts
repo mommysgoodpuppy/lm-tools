@@ -79,14 +79,19 @@ async function mirrorAndInspect(
   }
 }
 
-async function waitUntilReady(url: string, child: Deno.ChildProcess): Promise<void> {
-  const deadline = performance.now() + 120_000;
+async function waitUntilReady(
+  name: string,
+  url: string,
+  child: Deno.ChildProcess,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
   while (performance.now() < deadline) {
     const exited = await Promise.race([
       child.status.then((status) => ({ status })),
       new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 100)),
     ]);
-    if (exited) throw new Error(`llama-server exited during startup (${exited.status.code})`);
+    if (exited) throw new Error(`${name} exited during startup (${exited.status.code})`);
     try {
       const response = await fetch(url);
       await response.body?.cancel();
@@ -95,7 +100,90 @@ async function waitUntilReady(url: string, child: Deno.ChildProcess): Promise<vo
       // Startup commonly takes tens of seconds for a large model.
     }
   }
-  throw new Error("Timed out waiting for llama-server health check");
+  throw new Error(`Timed out waiting for ${name} health check`);
+}
+
+/** A model server process that the Responses proxy fronts. */
+export interface ProxiedServer {
+  name: string;
+  spawn(): Deno.ChildProcess;
+  /** The child leads its own process group (spawned through setsid); stop the whole group. */
+  processGroup: boolean;
+  healthUrl: string;
+  readyTimeoutMs: number;
+  upstream: URL;
+  contextLimit: number;
+  /** Out-of-band prompt progress read from the server's log lines (llama.cpp). */
+  promptProgress?: PromptProgressSource & { inspect(line: string): void };
+  diagnostics: Record<string, unknown>;
+}
+
+/** Runs `server`, waits for its health check, and serves the Responses proxy in front of it. */
+export async function runProxiedServer(
+  server: ProxiedServer,
+  stack: VscodeStackConfig,
+): Promise<void> {
+  const diagnostics = defaultDiagnosticLog();
+  diagnostics.log("vscode", "started", { server: server.name, ...server.diagnostics });
+  const inference = new InferenceTracker(server.contextLimit);
+  const child = server.spawn();
+  const inspect = (channel: "stdout" | "stderr") => (line: string) => {
+    server.promptProgress?.inspect(line);
+    diagnostics.log(server.name, channel, { line });
+  };
+  const outputTasks = [
+    mirrorAndInspect(child.stdout, Deno.stdout, inspect("stdout")),
+    mirrorAndInspect(child.stderr, Deno.stderr, inspect("stderr")),
+  ];
+  const abort = new AbortController();
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    abort.abort();
+    try {
+      if (server.processGroup) Deno.kill(-child.pid, "SIGTERM");
+      else child.kill("SIGTERM");
+    } catch {
+      // It may already have exited.
+    }
+  };
+  Deno.addSignalListener("SIGINT", shutdown);
+  Deno.addSignalListener("SIGTERM", shutdown);
+  try {
+    await waitUntilReady(server.name, server.healthUrl, child, server.readyTimeoutMs);
+    console.log(`${server.name} is ready`);
+    const proxy = serveProxy({
+      listenHost: stack.proxyHost,
+      listenPort: stack.proxyPort,
+      upstream: server.upstream,
+      promptProgress: server.promptProgress,
+      inference,
+      reasoningEffortMap: stack.reasoningEffortMap,
+      diagnostics,
+    }, abort.signal);
+    console.log(`Responses endpoint: http://${stack.proxyHost}:${stack.proxyPort}/v1/responses`);
+    const outcome = await Promise.race([
+      child.status.then((status) => ({ kind: "child" as const, status })),
+      proxy.finished.then(() => ({ kind: "proxy" as const })),
+    ]);
+    if (outcome.kind === "child" && !shuttingDown && !outcome.status.success) {
+      throw new Error(`${server.name} exited (${outcome.status.code})`);
+    }
+  } finally {
+    shutdown();
+    Deno.removeSignalListener("SIGINT", shutdown);
+    Deno.removeSignalListener("SIGTERM", shutdown);
+    const termination = await terminateChild(
+      child,
+      stack.shutdownGraceMs ?? 5000,
+      server.processGroup,
+    );
+    if (termination === "killed") console.error(`${server.name} ignored SIGTERM and was killed`);
+    await Promise.allSettled(outputTasks);
+    diagnostics.log("vscode", "stopped");
+    await diagnostics.flush();
+  }
 }
 
 export async function runVscodeStack(
@@ -123,71 +211,23 @@ export async function runVscodeStack(
   }
 
   await validateLlamaOptions(options);
-  const diagnostics = defaultDiagnosticLog();
-  diagnostics.log("vscode", "started", {
-    model: options.model,
-    context: options.context,
-    cacheTypeK: options.cacheTypeK,
-    cacheTypeV: options.cacheTypeV,
-    mtpDraftTokens: options.mtpDraftTokens,
-    dflashDraftTokens: options.dflashDraftTokens,
-    draftModel: options.draftModel,
-  });
-  const progress = new LlamaPromptProgress();
-  const inference = new InferenceTracker(options.context);
-  const child = spawnLlama(options, "piped");
-  const outputTasks = [
-    mirrorAndInspect(child.stdout, Deno.stdout, (line) => {
-      progress.inspect(line);
-      diagnostics.log("llama-server", "stdout", { line });
-    }),
-    mirrorAndInspect(child.stderr, Deno.stderr, (line) => {
-      progress.inspect(line);
-      diagnostics.log("llama-server", "stderr", { line });
-    }),
-  ];
-  const abort = new AbortController();
-  let shuttingDown = false;
-  const shutdown = () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    abort.abort();
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // It may already have exited.
-    }
-  };
-  Deno.addSignalListener("SIGINT", shutdown);
-  Deno.addSignalListener("SIGTERM", shutdown);
-  try {
-    await waitUntilReady(`http://${options.host}:${options.port}/health`, child);
-    console.log("llama-server is ready");
-    const proxy = serveProxy({
-      listenHost: stack.proxyHost,
-      listenPort: stack.proxyPort,
-      upstream: new URL(`http://${options.host}:${options.port}`),
-      promptProgress: progress,
-      inference,
-      reasoningEffortMap: stack.reasoningEffortMap,
-      diagnostics,
-    }, abort.signal);
-    console.log(`VS Code endpoint: http://${stack.proxyHost}:${stack.proxyPort}/v1/responses`);
-    const outcome = await Promise.race([
-      child.status.then((status) => ({ kind: "child" as const, status })),
-      proxy.finished.then(() => ({ kind: "proxy" as const })),
-    ]);
-    if (outcome.kind === "child" && !shuttingDown && !outcome.status.success) {
-      throw new Error(`llama-server exited (${outcome.status.code})`);
-    }
-  } finally {
-    shutdown();
-    Deno.removeSignalListener("SIGINT", shutdown);
-    Deno.removeSignalListener("SIGTERM", shutdown);
-    const termination = await terminateChild(child, stack.shutdownGraceMs ?? 5000);
-    if (termination === "killed") console.error("llama-server ignored SIGTERM and was killed");
-    await Promise.allSettled(outputTasks);
-    diagnostics.log("vscode", "stopped");
-    await diagnostics.flush();
-  }
+  await runProxiedServer({
+    name: "llama-server",
+    spawn: () => spawnLlama(options, "piped"),
+    processGroup: false,
+    healthUrl: `http://${options.host}:${options.port}/health`,
+    readyTimeoutMs: 120_000,
+    upstream: new URL(`http://${options.host}:${options.port}`),
+    contextLimit: options.context,
+    promptProgress: new LlamaPromptProgress(),
+    diagnostics: {
+      model: options.model,
+      context: options.context,
+      cacheTypeK: options.cacheTypeK,
+      cacheTypeV: options.cacheTypeV,
+      mtpDraftTokens: options.mtpDraftTokens,
+      dflashDraftTokens: options.dflashDraftTokens,
+      draftModel: options.draftModel,
+    },
+  }, stack);
 }
