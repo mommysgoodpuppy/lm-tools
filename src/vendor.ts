@@ -143,30 +143,99 @@ export async function loadVendorManifest(path: string): Promise<ResolvedVendorMa
   return { sourcePath, manifest, checkouts, artifacts };
 }
 
-async function patchApplied(checkoutPath: string, patch: string): Promise<boolean> {
+/** Runs Git with a private index file so tree computations never touch the checkout's index. */
+async function gitWithIndex(
+  checkoutPath: string,
+  indexFile: string,
+  args: string[],
+): Promise<{ success: boolean; stdout: string; stderr: string }> {
   const output = await new Deno.Command("git", {
-    args: ["-C", checkoutPath, "apply", "--reverse", "--check", patch],
-    stdout: "null",
-    stderr: "null",
+    args: ["-C", checkoutPath, ...args],
+    env: { GIT_INDEX_FILE: indexFile },
+    stdout: "piped",
+    stderr: "piped",
   }).output();
-  return output.success;
+  return {
+    success: output.success,
+    stdout: new TextDecoder().decode(output.stdout).trim(),
+    stderr: new TextDecoder().decode(output.stderr).trim(),
+  };
 }
 
-async function declaredPatchPaths(patches: string[]): Promise<Set<string>> {
-  const paths = new Set<string>();
-  for (const patch of patches) {
-    const text = await Deno.readTextFile(patch);
-    for (const line of text.split("\n")) {
-      const match = line.match(/^\+\+\+ b\/(.+)$/) ?? line.match(/^--- a\/(.+)$/);
-      if (match) paths.add(match[1]);
+/**
+ * Tree the checkout must have: the pinned revision with every declared patch
+ * applied in order. Patches are applied as a series in a scratch index, so a
+ * later patch may build on hunks an earlier one introduced.
+ */
+async function expectedTree(
+  checkout: VendorCheckout & { resolvedPath: string; resolvedPatches: string[] },
+  indexFile: string,
+): Promise<string> {
+  const read = await gitWithIndex(checkout.resolvedPath, indexFile, [
+    "read-tree",
+    checkout.revision,
+  ]);
+  if (!read.success) throw new Error(`git read-tree ${checkout.revision} failed: ${read.stderr}`);
+  for (const patch of checkout.resolvedPatches) {
+    if (!(await exists(patch))) throw new Error(`Missing patch for ${checkout.name}: ${patch}`);
+    const applied = await gitWithIndex(checkout.resolvedPath, indexFile, [
+      "apply",
+      "--cached",
+      patch,
+    ]);
+    if (!applied.success) {
+      throw new Error(
+        `Patch does not apply to ${checkout.name} after the patches before it: ${patch}\n${applied.stderr}`,
+      );
     }
   }
-  return paths;
+  const tree = await gitWithIndex(checkout.resolvedPath, indexFile, ["write-tree"]);
+  if (!tree.success) throw new Error(`git write-tree failed: ${tree.stderr}`);
+  return tree.stdout;
 }
 
-function statusPath(line: string): string {
-  const path = line.slice(3);
-  return path.includes(" -> ") ? path.split(" -> ").at(-1)! : path;
+/** Tree of the working copy as it stands, ignored files excluded. */
+async function workingTree(checkoutPath: string, indexFile: string): Promise<string> {
+  for (const args of [["read-tree", "HEAD"], ["add", "--all", "--", "."]]) {
+    const result = await gitWithIndex(checkoutPath, indexFile, args);
+    if (!result.success) throw new Error(`git ${args[0]} failed: ${result.stderr}`);
+  }
+  const tree = await gitWithIndex(checkoutPath, indexFile, ["write-tree"]);
+  if (!tree.success) throw new Error(`git write-tree failed: ${tree.stderr}`);
+  return tree.stdout;
+}
+
+type CheckoutState = "pristine" | "patched";
+
+/**
+ * Classifies a checkout at its pinned revision: `pristine` (no local changes),
+ * `patched` (exactly the declared patch series), or an error naming the
+ * paths that differ from the patched tree.
+ */
+async function checkoutState(
+  checkout: VendorCheckout & { resolvedPath: string; resolvedPatches: string[] },
+): Promise<CheckoutState> {
+  const scratch = await Deno.makeTempDir({ prefix: "lm-vendor-index-" });
+  try {
+    const expected = await expectedTree(checkout, `${scratch}/expected`);
+    const actual = await workingTree(checkout.resolvedPath, `${scratch}/actual`);
+    if (actual === expected) return "patched";
+    const head = await run(["git", "-C", checkout.resolvedPath, "rev-parse", "HEAD^{tree}"], {
+      capture: true,
+    });
+    if (actual === head) return "pristine";
+    const changed = await run(
+      ["git", "-C", checkout.resolvedPath, "diff", "--name-only", expected, actual],
+      { capture: true },
+    );
+    throw new Error(
+      `Unexpected local changes in ${checkout.name} (relative to its patch series): ${
+        changed.split("\n").filter(Boolean).join(", ")
+      }`,
+    );
+  } finally {
+    await Deno.remove(scratch, { recursive: true });
+  }
 }
 
 async function checkCheckout(
@@ -187,24 +256,9 @@ async function checkCheckout(
   if (remote !== checkout.repository) {
     throw new Error(`${checkout.name} origin is ${remote}; expected ${checkout.repository}`);
   }
-  for (const patch of checkout.resolvedPatches) {
-    if (!(await exists(patch))) throw new Error(`Missing patch for ${checkout.name}: ${patch}`);
-    if (!(await patchApplied(checkout.resolvedPath, patch))) {
-      throw new Error(`Patch is not applied to ${checkout.name}: ${patch}`);
-    }
-  }
-  const allowedPaths = await declaredPatchPaths(checkout.resolvedPatches);
-  const status = await run(
-    ["git", "-C", checkout.resolvedPath, "status", "--porcelain", "--untracked-files=all"],
-    { capture: true, trim: false },
-  );
-  const unexpected = status.split("\n").filter(Boolean).map(statusPath).filter((path) =>
-    !allowedPaths.has(path)
-  );
-  if (unexpected.length > 0) {
-    throw new Error(
-      `Unexpected local changes in ${checkout.name}: ${unexpected.join(", ")}`,
-    );
+  const state = await checkoutState(checkout);
+  if (state === "pristine" && checkout.resolvedPatches.length > 0) {
+    throw new Error(`Patches are not applied to ${checkout.name}`);
   }
 }
 
@@ -294,10 +348,10 @@ async function applyVendorManifest(resolved: ResolvedVendorManifest): Promise<vo
     if (actual !== checkout.revision) {
       throw new Error(`${checkout.name} is at ${actual}; expected ${checkout.revision}`);
     }
-    for (const patch of checkout.resolvedPatches) {
-      if (await patchApplied(checkout.resolvedPath, patch)) continue;
-      await run(["git", "-C", checkout.resolvedPath, "apply", "--check", patch]);
-      await run(["git", "-C", checkout.resolvedPath, "apply", patch]);
+    if ((await checkoutState(checkout)) === "pristine") {
+      for (const patch of checkout.resolvedPatches) {
+        await run(["git", "-C", checkout.resolvedPath, "apply", patch]);
+      }
     }
   }
   for (const step of resolvedSteps(resolved)) {
