@@ -16,7 +16,8 @@
       "description": "Discriminated backend configuration. Additional backend kinds extend this union.",
       "oneOf": [
         { "$ref": "#/$defs/llamaCppBackend" },
-        { "$ref": "#/$defs/llamaCppDiffusionBackend" }
+        { "$ref": "#/$defs/llamaCppDiffusionBackend" },
+        { "$ref": "#/$defs/hipfireBackend" }
       ]
     },
     "compatibility": { "$ref": "#/$defs/compatibility" },
@@ -264,6 +265,66 @@
             "marginMiB": { "type": "integer", "minimum": 0 }
           }
         }
+      }
+    },
+    "hipfireBackend": {
+      "description": "hipfire serve, always behind the lm-tools Responses proxy. lm-tools owns home (HIPFIRE_HOME): it links the model, draft and vision files into home/models under their own file names, which must be the hipfire registry file names for tag, and writes the model catalog that aliases model.id to tag.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "executable",
+        "home",
+        "listen",
+        "tag",
+        "kvMode",
+        "maxSeq",
+        "ui",
+        "speculative"
+      ],
+      "properties": {
+        "kind": { "const": "hipfire" },
+        "executable": { "$ref": "#/$defs/nonEmptyString" },
+        "vendor": { "$ref": "#/$defs/vendorBuild" },
+        "home": { "$ref": "#/$defs/nonEmptyString" },
+        "listen": { "$ref": "#/$defs/listen" },
+        "tag": { "$ref": "#/$defs/nonEmptyString" },
+        "kvMode": { "$ref": "#/$defs/nonEmptyString" },
+        "maxSeq": { "type": "integer", "minimum": 1 },
+        "ui": { "type": "boolean" },
+        "speculative": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind"],
+              "properties": { "kind": { "const": "none" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "model", "blockSize"],
+              "properties": {
+                "kind": { "const": "dflash" },
+                "model": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["path", "source"],
+                  "properties": {
+                    "path": { "$ref": "#/$defs/nonEmptyString" },
+                    "source": { "$ref": "#/$defs/artifactSource" }
+                  }
+                },
+                "blockSize": { "type": "integer", "minimum": 1 }
+              }
+            }
+          ]
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "readyTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
       }
     },
     "compatibility": {

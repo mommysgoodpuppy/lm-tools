@@ -54,8 +54,15 @@ machine-specific policy from leaking into this repository.
 ## Declarative deployments
 
 Deployment files use [`schemas/deployment.schema.json`](schemas/deployment.schema.json). They can
-declare model artifacts with size and SHA-256 checks, llama.cpp runtime options, compatibility
+declare model artifacts with size and SHA-256 checks, backend runtime options, compatibility
 proxies, generated client configuration, auxiliary processes, and optional pinned vendor artifacts.
+
+Backends are `llama.cpp`, `llama.cpp-diffusion` and `hipfire`. A `hipfire` deployment always runs
+behind the Responses proxy. lm-tools owns its `home` (HIPFIRE_HOME): it links the model, DFlash
+draft and vision sidecar into `home/models` (their file names must be the hipfire registry's for the
+tag) and writes the catalog that aliases `model.id` to the tag. hipfire streams prompt progress
+in-band, and the proxy renders it as the same prompt-evaluation reasoning llama.cpp deployments
+show.
 
 ```bash
 deno run -A main.ts deploy project/deployment.json --check

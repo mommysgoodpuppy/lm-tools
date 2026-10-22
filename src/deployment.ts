@@ -17,7 +17,17 @@ import {
   requireModelVram,
   terminateChild,
 } from "./process_manager.ts";
-import { runVscodeStack } from "./vscode.ts";
+import { runProxiedServer, runVscodeStack } from "./vscode.ts";
+import {
+  buildHipfireArgs,
+  buildHipfireEnvironment,
+  DEFAULT_HIPFIRE_READY_TIMEOUT_SECONDS,
+  type HipfireBackend,
+  hipfireDaemonPath,
+  type HipfireModelFiles,
+  materializeHipfireHome,
+  spawnHipfire,
+} from "./hipfire.ts";
 import { checkVendorManifest, loadVendorManifest, vendorArtifact } from "./vendor.ts";
 
 const PROJECT_ROOT = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
@@ -76,7 +86,7 @@ interface ModelDeployment {
         vram: { devicePath: string; minimumRemainingMiB: number };
       };
   };
-  backend: LlamaCppBackend | LlamaCppDiffusionBackend;
+  backend: LlamaCppBackend | LlamaCppDiffusionBackend | HipfireBackend;
   compatibility?: {
     responsesProxy: DisabledService | EnabledProxy;
   };
@@ -207,6 +217,18 @@ export interface ResolvedDeployment {
   omp?: OmpClient;
 }
 
+/** Model files of a hipfire deployment: model, DFlash draft and vision sidecar. */
+export function hipfireModelFiles(config: ModelDeployment): HipfireModelFiles {
+  const backend = config.backend;
+  return {
+    model: config.model.path,
+    draft: backend.kind === "hipfire" && backend.speculative.kind === "dflash"
+      ? backend.speculative.model.path
+      : undefined,
+    vision: config.model.visionProjector?.path,
+  };
+}
+
 export function deployUsage(): string {
   return `Usage: lm deploy CONFIG [options]
 
@@ -304,7 +326,7 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
     );
   }
   if (
-    backend.kind !== "llama.cpp" && (proxy || vscode || codex || omp || tailscaleServe)
+    backend.kind === "llama.cpp-diffusion" && (proxy || vscode || codex || omp || tailscaleServe)
   ) {
     throw new Error(
       `${backend.kind} does not expose the HTTP API required by proxy/clients/Tailscale Serve`,
@@ -315,14 +337,17 @@ export async function loadDeployment(path: string): Promise<ResolvedDeployment> 
       "visionProjector requires model.capabilities.vision=true",
     );
   }
-  if (config.model.visionProjector && backend.kind !== "llama.cpp") {
-    throw new Error("visionProjector currently requires backend.kind=llama.cpp");
+  if (config.model.visionProjector && backend.kind === "llama.cpp-diffusion") {
+    throw new Error("visionProjector requires backend.kind=llama.cpp or hipfire");
   }
   if (
-    backend.kind === "llama.cpp" && config.model.capabilities.vision &&
+    backend.kind !== "llama.cpp-diffusion" && config.model.capabilities.vision &&
     !config.model.visionProjector
   ) {
-    throw new Error("llama.cpp vision models require visionProjector");
+    throw new Error(`${backend.kind} vision models require visionProjector`);
+  }
+  if (backend.kind === "hipfire" && !proxy) {
+    throw new Error("hipfire deployments must enable compatibility.responsesProxy");
   }
   const llama: LlamaOptions | undefined = backend.kind === "llama.cpp"
     ? {
@@ -411,7 +436,7 @@ export function buildVscodeProvider(
   const client = deployment.vscode;
   if (!client) return undefined;
   const config = deployment.config;
-  if (config.backend.kind !== "llama.cpp") {
+  if (config.backend.kind === "llama.cpp-diffusion") {
     throw new Error(`Cannot generate a VS Code provider for ${config.backend.kind}`);
   }
   const endpoint = deployment.proxy?.listen ?? config.backend.listen;
@@ -735,7 +760,7 @@ async function clientApiBaseUrl(deployment: ResolvedDeployment): Promise<string>
 }
 
 async function writeApiJsons(deployment: ResolvedDeployment): Promise<string[] | undefined> {
-  if (deployment.config.backend.kind !== "llama.cpp") return undefined;
+  if (deployment.config.backend.kind === "llama.cpp-diffusion") return undefined;
   const directory = apiJsonDirectory(deployment);
   const baseUrl = await clientApiBaseUrl(deployment);
   const codexCatalogPath = `${directory}/codex-model-catalog.json`;
@@ -830,7 +855,7 @@ async function validateInstalledBackend(
         }; run lm deploy ${deployment.sourcePath} --fetch`,
       );
     }
-    if (backend.kind === "llama.cpp" && backend.speculative.kind === "dflash") {
+    if (backend.kind !== "llama.cpp-diffusion" && backend.speculative.kind === "dflash") {
       try {
         await assertFile(backend.speculative.model.path, "Draft model");
       } catch (error) {
@@ -843,8 +868,9 @@ async function validateInstalledBackend(
     }
   }
   await assertFile(backend.executable, backend.kind, true);
+  // hipfire documents its serve options under `hipfire serve --help`.
   const output = await new Deno.Command(backend.executable, {
-    args: ["--help"],
+    args: backend.kind === "hipfire" ? ["serve", "--help"] : ["--help"],
     stdout: "piped",
     stderr: "piped",
   }).output();
@@ -852,6 +878,8 @@ async function validateInstalledBackend(
   const help = new TextDecoder().decode(output.stdout);
   const emitted = backend.kind === "llama.cpp"
     ? buildLlamaArgs(deployment.llama!)
+    : backend.kind === "hipfire"
+    ? buildHipfireArgs(backend)
     : buildDiffusionRunnerArgs(backend);
   const unsupported = [...new Set(emitted.filter((arg) => arg.startsWith("-")))]
     .filter((option) => !help.includes(option));
@@ -860,6 +888,11 @@ async function validateInstalledBackend(
   }
   if (backend.kind === "llama.cpp") {
     if (deployment.llama?.mmproj) await assertFile(deployment.llama.mmproj, "Vision projector");
+  } else if (backend.kind === "hipfire") {
+    await assertFile(hipfireDaemonPath(backend), "hipfire daemon", true);
+    await assertFile("/usr/bin/setsid", "hipfire process-group launcher", true);
+    const vision = deployment.config.model.visionProjector;
+    if (vision && requireModel) await assertFile(vision.path, "Vision sidecar");
   } else {
     const devices = await new Deno.Command(backend.executable, {
       args: ["--list-devices"],
@@ -931,7 +964,7 @@ async function fetchModelArtifacts(deployment: ResolvedDeployment): Promise<void
     await fetchArtifact("vision projector", projector.path, projector.source);
   }
   const backend = deployment.config.backend;
-  if (backend.kind === "llama.cpp" && backend.speculative.kind === "dflash") {
+  if (backend.kind !== "llama.cpp-diffusion" && backend.speculative.kind === "dflash") {
     await fetchArtifact(
       "DFlash draft artifact",
       backend.speculative.model.path,
@@ -942,7 +975,9 @@ async function fetchModelArtifacts(deployment: ResolvedDeployment): Promise<void
 
 function deploymentHttpEndpoint(deployment: ResolvedDeployment): ListenAddress {
   const backend = deployment.config.backend;
-  if (backend.kind !== "llama.cpp") throw new Error(`${backend.kind} has no HTTP endpoint`);
+  if (backend.kind === "llama.cpp-diffusion") {
+    throw new Error(`${backend.kind} has no HTTP endpoint`);
+  }
   return deployment.proxy?.listen ?? backend.listen;
 }
 
@@ -1013,6 +1048,15 @@ function printPlan(deployment: ResolvedDeployment): void {
       }),
     ].map(shellQuote).join(" ");
     console.log(`Process:    ${command}`);
+  } else if (deployment.config.backend.kind === "hipfire") {
+    const backend = deployment.config.backend;
+    const environment = buildHipfireEnvironment(backend, hipfireModelFiles(deployment.config));
+    const command = [
+      ...Object.entries(environment).map(([key, value]) => `${key}=${shellQuote(value)}`),
+      ...[backend.executable, ...buildHipfireArgs(backend)].map(shellQuote),
+    ].join(" ");
+    console.log(`Process:    ${command}`);
+    console.log(`Home:       ${backend.home} (generated)`);
   } else {
     const backend = deployment.config.backend;
     if (backend.kind !== "llama.cpp-diffusion") throw new Error("Unsupported backend");
@@ -1290,8 +1334,15 @@ export async function deployCommand(args: string[]): Promise<void> {
     : undefined;
   try {
     if (gpu?.mode === "exclusive") {
+      const backend = deployment.config.backend;
       const evicted = await evictConflictingProcesses(
-        [...new Set([...gpu.conflictingExecutables, deployment.config.backend.executable])],
+        [
+          ...new Set([
+            ...gpu.conflictingExecutables,
+            backend.executable,
+            ...(backend.kind === "hipfire" ? [hipfireDaemonPath(backend)] : []),
+          ]),
+        ],
         gpu.shutdownGraceSeconds * 1000,
       );
       for (const process of evicted) {
@@ -1312,7 +1363,28 @@ export async function deployCommand(args: string[]): Promise<void> {
       );
     }
     await withTailscaleServe(deployment, async () => {
-      if (deployment.proxy) {
+      const backend = deployment.config.backend;
+      if (deployment.proxy && backend.kind === "hipfire") {
+        const files = hipfireModelFiles(deployment.config);
+        await materializeHipfireHome(backend, deployment.config.model.id, files);
+        await runProxiedServer({
+          name: "hipfire",
+          spawn: () => spawnHipfire(backend, files),
+          processGroup: true,
+          healthUrl: `http://${backend.listen.host}:${backend.listen.port}/health`,
+          readyTimeoutMs: (backend.readyTimeoutSeconds ?? DEFAULT_HIPFIRE_READY_TIMEOUT_SECONDS) *
+            1000,
+          upstream: new URL(`http://${backend.listen.host}:${backend.listen.port}`),
+          contextLimit: deployment.config.runtime.contextWindow,
+          diagnostics: { tag: backend.tag, maxSeq: backend.maxSeq, kvMode: backend.kvMode },
+        }, {
+          proxyHost: deployment.proxy.listen.host,
+          proxyPort: deployment.proxy.listen.port,
+          modelAlias: deployment.config.model.id,
+          reasoningEffortMap: reasoningEffortAliases(deployment),
+          shutdownGraceMs: gpu?.mode === "exclusive" ? gpu.shutdownGraceSeconds * 1000 : 5000,
+        });
+      } else if (deployment.proxy) {
         if (!deployment.llama) {
           throw new Error("Responses proxy requires a llama.cpp server backend");
         }
