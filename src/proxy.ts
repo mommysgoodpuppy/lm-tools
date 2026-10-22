@@ -346,6 +346,58 @@ function reasoningPartEvent(
   };
 }
 
+/** SSE events that open the synthetic prompt-evaluation reasoning item. */
+function openPromptTrace(trace: NonNullable<ReasoningStreamState["promptTrace"]>): string {
+  const item = { id: trace.itemId, type: "reasoning", status: "in_progress", summary: [] };
+  return [
+    { type: "response.output_item.added", output_index: -1, item },
+    {
+      type: "response.reasoning_summary_part.added",
+      item_id: trace.itemId,
+      output_index: -1,
+      summary_index: 0,
+      part: reasoningSummary(""),
+    },
+    {
+      type: "response.reasoning_summary_text.delta",
+      item_id: trace.itemId,
+      output_index: -1,
+      summary_index: 0,
+      delta: trace.text,
+    },
+  ].map(syntheticSseBlock).join("");
+}
+
+/** One progress line for the prompt-evaluation trace, or "" when it would not advance. */
+function promptTraceProgress(
+  trace: NonNullable<ReasoningStreamState["promptTrace"]>,
+  current: PromptEvaluationProgress,
+): string {
+  if (!trace.active || current.progress <= trace.lastProgress) return "";
+  trace.lastProgress = current.progress;
+  const percent = Math.min(100, Math.max(0, Math.round(current.progress * 100)));
+  const delta = `Prompt evaluation: ${percent}% (${
+    current.tokens.toLocaleString("en-US")
+  } tokens)\n`;
+  trace.text += delta;
+  return syntheticSseBlock({
+    type: "response.reasoning_summary_text.delta",
+    item_id: trace.itemId,
+    output_index: -1,
+    summary_index: 0,
+    delta,
+  });
+}
+
+/** Upstream-native prompt progress: hipfire's `hipfire.prefill_progress` (`done` / `total`). */
+const PREFILL_PROGRESS_EVENT = "hipfire.prefill_progress";
+
+function prefillProgress(event: JsonObject): PromptEvaluationProgress | undefined {
+  const { done, total } = event;
+  if (typeof done !== "number" || typeof total !== "number" || total <= 0) return undefined;
+  return { taskId: 0, tokens: done, progress: done / total };
+}
+
 function finishPromptTrace(state: ReasoningStreamState): string {
   const trace = state.promptTrace;
   if (!trace?.active) return "";
@@ -387,6 +439,23 @@ function adaptSseBlock(
     const event = JSON.parse(lines[dataIndex].slice(6)) as JsonObject;
     observe?.(event);
     const type = event.type;
+    if (type === PREFILL_PROGRESS_EVENT) {
+      // Rendered as the prompt-evaluation trace (opened on the first event
+      // when no out-of-band progress source started one); never forwarded.
+      const current = prefillProgress(event);
+      let rendered = "";
+      if (!state.promptTrace) {
+        state.promptTrace = {
+          itemId: systemReasoningItemId("prompt-evaluation"),
+          active: true,
+          lastProgress: -1,
+          text: "Evaluating prompt…\n",
+        };
+        rendered += openPromptTrace(state.promptTrace);
+      }
+      if (current) rendered += promptTraceProgress(state.promptTrace, current);
+      return rendered;
+    }
     const itemId = typeof event.item_id === "string" ? event.item_id : undefined;
     let prefix = "";
 
@@ -486,8 +555,17 @@ function adaptSseBlock(
   }
 }
 
+/** Whether an SSE block is upstream prompt progress, which only the trace renders. */
+function isPrefillProgressBlock(block: string): boolean {
+  return block.split("\n").some((line) =>
+    line === `event: ${PREFILL_PROGRESS_EVENT}` ||
+    line.startsWith("data: ") && line.includes(`"type":"${PREFILL_PROGRESS_EVENT}"`)
+  );
+}
+
 /**
- * Passes an SSE body through untouched while emitting proxy-trace events.
+ * Passes an SSE body through while emitting proxy-trace events. Upstream
+ * prompt-progress events are dropped: they are not part of the Responses API.
  *
  * Stream *adaptation* is gated on `include: reasoning.encrypted_content`,
  * because only clients asking for that need the VS Code reasoning shape.
@@ -524,7 +602,7 @@ export function observeStream(
         while ((boundary = buffered.indexOf("\n\n")) !== -1) {
           const block = buffered.slice(0, boundary);
           consume(block);
-          controller.enqueue(`${block}\n\n`);
+          if (!isPrefillProgressBlock(block)) controller.enqueue(`${block}\n\n`);
           buffered = buffered.slice(boundary + 2);
         }
       },
@@ -561,48 +639,13 @@ export function adaptReasoningStream(
       start(controller) {
         const trace = state.promptTrace;
         if (!trace || !promptProgress) return;
-        const item = {
-          id: trace.itemId,
-          type: "reasoning",
-          status: "in_progress",
-          summary: [],
-        };
-        controller.enqueue(
-          [
-            { type: "response.output_item.added", output_index: -1, item },
-            {
-              type: "response.reasoning_summary_part.added",
-              item_id: trace.itemId,
-              output_index: -1,
-              summary_index: 0,
-              part: reasoningSummary(""),
-            },
-            {
-              type: "response.reasoning_summary_text.delta",
-              item_id: trace.itemId,
-              output_index: -1,
-              summary_index: 0,
-              delta: trace.text,
-            },
-          ].map(syntheticSseBlock).join(""),
-        );
+        controller.enqueue(openPromptTrace(trace));
         timer = setInterval(() => {
           try {
             const current = promptProgress();
-            if (!trace.active || !current || current.progress <= trace.lastProgress) return;
-            trace.lastProgress = current.progress;
-            const percent = Math.min(100, Math.max(0, Math.round(current.progress * 100)));
-            const delta = `Prompt evaluation: ${percent}% (${
-              current.tokens.toLocaleString("en-US")
-            } tokens)\n`;
-            trace.text += delta;
-            controller.enqueue(syntheticSseBlock({
-              type: "response.reasoning_summary_text.delta",
-              item_id: trace.itemId,
-              output_index: -1,
-              summary_index: 0,
-              delta,
-            }));
+            if (!current) return;
+            const delta = promptTraceProgress(trace, current);
+            if (delta) controller.enqueue(delta);
           } catch {
             if (timer !== undefined) clearInterval(timer);
           }
@@ -941,6 +984,7 @@ export class InferenceTracker {
   #contextLimit = 0;
   #updatedAt: string | null = null;
   #generating = false;
+  #streamedProgress?: PromptEvaluationProgress;
 
   constructor(contextLimit = 0) {
     this.#contextLimit = contextLimit;
@@ -955,15 +999,25 @@ export class InferenceTracker {
       : 0;
     this.#updatedAt = new Date().toISOString();
     this.#generating = false;
+    this.#streamedProgress = undefined;
+  }
+
+  /** Records prompt progress the upstream streamed in-band (`hipfire.prefill_progress`). */
+  observePromptProgress(progress: PromptEvaluationProgress): void {
+    this.#streamedProgress = progress;
+    this.#generating = false;
+    this.#updatedAt = new Date().toISOString();
   }
 
   /** Marks the transition out of prompt evaluation into token generation. */
   observeGenerating(): void {
     this.#generating = true;
+    this.#streamedProgress = undefined;
     this.#updatedAt = new Date().toISOString();
   }
 
-  snapshot(progress?: PromptEvaluationProgress): InferenceSnapshot {
+  snapshot(sourceProgress?: PromptEvaluationProgress): InferenceSnapshot {
+    const progress = sourceProgress ?? this.#streamedProgress;
     const limit = this.#contextLimit;
     const used = this.#lastInputTokens;
     // llama reports a cumulative fraction per task, so total is recoverable
@@ -1207,6 +1261,11 @@ async function proxy(request: Request, options: ProxyOptions): Promise<Response>
     }
     const isSse = upstream.headers.get("content-type")?.toLowerCase().includes("text/event-stream");
     const observeResponseEvent = (event: JsonObject) => {
+      if (event.type === PREFILL_PROGRESS_EVENT) {
+        const progress = prefillProgress(event);
+        if (progress) options.inference?.observePromptProgress(progress);
+        return;
+      }
       for (const normalized of proxyTraceResponseEvents(event)) {
         options.trace?.log("proxy-trace", "event", { requestId, event: normalized });
       }

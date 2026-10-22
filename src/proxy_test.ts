@@ -587,3 +587,65 @@ Deno.test("no default configured leaves absent reasoning absent", () => {
   const result = normalizeRequestBody(body, {});
   assertEquals((result.body as Record<string, unknown>).reasoning, undefined);
 });
+
+const prefillProgressSse = (done: number, total: number) =>
+  `event: hipfire.prefill_progress\ndata: ${
+    JSON.stringify({ type: "hipfire.prefill_progress", done, total, sequence_number: 2 })
+  }\n\n`;
+
+Deno.test("renders upstream prefill progress events as the prompt evaluation trace", async () => {
+  const input = new Response(
+    'event: response.created\ndata: {"type":"response.created"}\n\n' +
+      prefillProgressSse(0, 35288) +
+      prefillProgressSse(17644, 35288) +
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"OK"}\n\n',
+  ).body;
+  if (!input) throw new Error("test stream unavailable");
+  const output = await new Response(adaptReasoningStream(input)).text();
+  assertEquals(output.includes("hipfire.prefill_progress"), false);
+  const events = [...output.matchAll(/^data: (.+)$/gm)].map((match) => JSON.parse(match[1]));
+  assertEquals(events.map((event) => event.type), [
+    "response.created",
+    "response.output_item.added",
+    "response.reasoning_summary_part.added",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.delta",
+    "response.reasoning_summary_text.done",
+    "response.reasoning_summary_part.done",
+    "response.output_item.done",
+    "response.output_text.delta",
+  ]);
+  assertEquals(events[3].delta, "Evaluating prompt…\n");
+  assertEquals(events[4].delta, "Prompt evaluation: 0% (0 tokens)\n");
+  assertEquals(events[5].delta, "Prompt evaluation: 50% (17,644 tokens)\n");
+  assertEquals(events[8].item.id.startsWith("lm-tools-system-reasoning-prompt-evaluation-"), true);
+});
+
+Deno.test("drops upstream prefill progress events from observed streams", async () => {
+  const input = new Response(
+    prefillProgressSse(0, 100) +
+      'event: response.completed\ndata: {"type":"response.completed","response":{}}\n\n',
+  ).body;
+  if (!input) throw new Error("test stream unavailable");
+  const observed: string[] = [];
+  const output = await new Response(
+    observeStream(input, (event) => observed.push(String(event.type))),
+  ).text();
+  assertEquals(
+    output,
+    'event: response.completed\ndata: {"type":"response.completed","response":{}}\n\n',
+  );
+  assertEquals(observed, ["hipfire.prefill_progress", "response.completed"]);
+});
+
+Deno.test("reports streamed prompt progress until generation starts", () => {
+  const tracker = new InferenceTracker(1000);
+  tracker.observePromptProgress({ taskId: 0, tokens: 250, progress: 0.25 });
+  const prompt = tracker.snapshot();
+  assertEquals(prompt.phase, "prompt");
+  assertEquals(prompt.prompt.processed, 250);
+  assertEquals(prompt.prompt.total, 1000);
+  tracker.observeGenerating();
+  assertEquals(tracker.snapshot().phase, "generation");
+});
