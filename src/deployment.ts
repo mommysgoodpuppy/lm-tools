@@ -17,6 +17,7 @@ import {
   requireModelVram,
   terminateChild,
 } from "./process_manager.ts";
+import { requireNoGpuReservation } from "./gpu_reservation.ts";
 import { runProxiedServer, runVscodeStack } from "./vscode.ts";
 import {
   buildHipfireArgs,
@@ -239,7 +240,8 @@ Options:
   --dry-run      Print the resolved process and generated client configuration
   --fetch        Download or verify all declared model artifacts, then exit
   --client-only  Reconcile declared client configuration without starting services
-  --help         Show this help`;
+  --force        Start even while the GPU is reserved (lm gpu reserve)
+  --help        Show this help`;
 }
 
 function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
@@ -1283,9 +1285,11 @@ export async function deployCommand(args: string[]): Promise<void> {
   let dryRun = false;
   let fetch = false;
   let clientOnly = false;
+  let force = false;
   let positionalSeen = false;
   for (const arg of args) {
     if (arg === "--check") check = true;
+    else if (arg === "--force") force = true;
     else if (arg === "--dry-run") dryRun = true;
     else if (arg === "--fetch") fetch = true;
     else if (arg === "--client-only") clientOnly = true;
@@ -1321,6 +1325,7 @@ export async function deployCommand(args: string[]): Promise<void> {
   const apiJsons = await writeApiJsons(deployment);
   if (apiJsons?.length) console.log(`Generated API client JSON: ${apiJsons.join(", ")}`);
   if (clientOnly) return;
+  if (!force) await requireNoGpuReservation();
 
   if (deployment.proxy && (deployment.config.services?.length ?? 0) > 0) {
     throw new Error("Auxiliary services and the Responses proxy cannot yet share one deployment");

@@ -51,6 +51,23 @@ The base file owns shared client reasoning-level mappings, GPU resource policy, 
 units, and Tailscale Serve routes. Keeping that file with the concrete deployment prevents
 machine-specific policy from leaking into this repository.
 
+## GPU reservations
+
+Another GPU workload, such as VR, can reserve the GPU:
+
+```bash
+deno run -A main.ts gpu reserve --owner steamvr --pid 1234 --reason "SteamVR running"
+deno run -A main.ts gpu status
+deno run -A main.ts gpu release --owner steamvr
+```
+
+Reserving stops every running inference backend, whether or not a configuration lists it:
+`llama-server`, `hipfire` and its daemon, the base configuration's conflicting executables, and
+`lm deploy` processes. A backend running in a systemd user service is stopped through that service,
+so restart policies do not bring it back. Processes in scopes, such as terminals, are signaled
+directly instead. While a reservation is active, `lm deploy` refuses to start; `--force` overrides
+this. A reservation with `--pid` lapses when that process exits. Releasing does not restart models.
+
 ## Declarative deployments
 
 Deployment files use [`schemas/deployment.schema.json`](schemas/deployment.schema.json). They can

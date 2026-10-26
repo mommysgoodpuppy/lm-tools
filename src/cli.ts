@@ -1,4 +1,5 @@
 import { killEverythingCommand, killEverythingUsage } from "./cleanup.ts";
+import { gpuCommand, gpuUsage } from "./gpu_reservation.ts";
 import { benchmarkCommand, benchmarkUsage } from "./benchmark.ts";
 import { downloadCommand, downloadUsage } from "./download.ts";
 import { deployCommand, deployUsage } from "./deployment.ts";
@@ -27,7 +28,8 @@ Commands:
   free-router  Serve an explicitly zero-priced remote inference pool
   task      Run one bounded OMP task (profiles: free, paid)
   kill-everything  Stop all configured model services and inference processes
-  llama     Launch llama-server with useful local defaults
+  gpu       Reserve the GPU for another workload (e.g. VR) and stop running inference
+  llama    Launch llama-server with useful local defaults
   proxy     Adapt OpenAI-compatible traffic for clients such as VS Code
   vendor    Materialize and verify declarative pinned source builds
 
@@ -57,6 +59,9 @@ export async function main(args: string[]): Promise<void> {
       return;
     case "kill-everything":
       await killEverythingCommand(commandArgs);
+      return;
+    case "gpu":
+      await gpuCommand(commandArgs);
       return;
     case "free-router":
       await freeRouterCommand(commandArgs);
@@ -89,6 +94,8 @@ export async function main(args: string[]): Promise<void> {
           ? clawUsage()
           : topic === "kill-everything"
           ? killEverythingUsage()
+          : topic === "gpu"
+          ? gpuUsage()
           : topic === "free-router"
           ? freeRouterUsage()
           : topic === "llama" || topic === "serve"
